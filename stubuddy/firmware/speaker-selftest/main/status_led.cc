@@ -62,6 +62,8 @@ esp_err_t StatusLed::Initialize() {
 void StatusLed::SetState(LedState state) {
     bool changed = false;
     portENTER_CRITICAL(&mutex_);
+    audio_state_ = state;
+    state = EffectiveLedState(audio_state_, network_state_);
     if (state_ != state) {
         state_ = state;
         epoch_ms_ = NowMs();
@@ -71,6 +73,21 @@ void StatusLed::SetState(LedState state) {
     if (changed) {
         ESP_LOGI(kTag, "%s", LedStateName(state));
     }
+}
+
+void StatusLed::SetNetworkState(NetworkLedState state) {
+    bool changed = false;
+    portENTER_CRITICAL(&mutex_);
+    network_state_ = state;
+    const LedState effective = EffectiveLedState(audio_state_, network_state_);
+    if (state_ != effective) {
+        state_ = effective;
+        epoch_ms_ = NowMs();
+        changed = true;
+    }
+    portEXIT_CRITICAL(&mutex_);
+    if (changed)
+        ESP_LOGI(kTag, "%s", LedStateName(effective));
 }
 
 void StatusLed::OnTick(void* context) { static_cast<StatusLed*>(context)->UpdateOutput(); }

@@ -1,6 +1,8 @@
 #include "board_config.h"
 #include "ptt_button.h"
 #include "status_led.h"
+#include "wifi_rules.h"
+#include "wifi_setup.h"
 
 #include <driver/i2s_pdm.h>
 #include <driver/i2s_std.h>
@@ -30,6 +32,7 @@ namespace {
 constexpr char kTag[] = "STUBUDDY_SPEAKER";
 using stubuddy::LedState;
 stubuddy::StatusLed status_led;
+stubuddy::WifiSetup wifi_setup;
 constexpr uint32_t kSampleRate = 16000;
 constexpr size_t kFramesPerBlock = 128;
 constexpr size_t kChannels = 2;
@@ -378,6 +381,21 @@ bool RawButtonPressed() { return gpio_get_level(stubuddy::kMainButton) == 0; }
 
 void RefreshLocalLed() { status_led.SetState(stubuddy::LocalWaitingLedState(RawButtonPressed())); }
 
+esp_err_t InitializeMainButton() {
+    static bool configured = false;
+    if (configured)
+        return ESP_OK;
+    gpio_config_t config = {};
+    config.pin_bit_mask = 1ULL << stubuddy::kMainButton;
+    config.mode = GPIO_MODE_INPUT;
+    config.pull_up_en = GPIO_PULLUP_ENABLE;
+    config.pull_down_en = GPIO_PULLDOWN_DISABLE;
+    config.intr_type = GPIO_INTR_DISABLE;
+    ESP_RETURN_ON_ERROR(gpio_config(&config), kTag, "GPIO15 button init failed");
+    configured = true;
+    return ESP_OK;
+}
+
 [[maybe_unused]] esp_err_t ButtonRecordAndReplay() {
     constexpr size_t max_samples = kSampleRate * kPttMaxSeconds;
     constexpr size_t recording_bytes = max_samples * sizeof(int16_t);
@@ -391,13 +409,7 @@ void RefreshLocalLed() { status_led.SetState(stubuddy::LocalWaitingLedState(RawB
     ESP_LOGI(kTag, "PTT CONFIG: max=%u seconds, buffer=%u bytes; timeout=auto-replay",
              static_cast<unsigned>(kPttMaxSeconds), static_cast<unsigned>(recording_bytes));
 
-    gpio_config_t config = {};
-    config.pin_bit_mask = 1ULL << stubuddy::kMainButton;
-    config.mode = GPIO_MODE_INPUT;
-    config.pull_up_en = GPIO_PULLUP_ENABLE;
-    config.pull_down_en = GPIO_PULLDOWN_DISABLE;
-    config.intr_type = GPIO_INTR_DISABLE;
-    ESP_RETURN_ON_ERROR(gpio_config(&config), kTag, "GPIO15 button init failed");
+    ESP_RETURN_ON_ERROR(InitializeMainButton(), kTag, "PTT button setup failed");
     stubuddy::PttButton button;
     std::array<int16_t, poll_samples> discard = {};
     unsigned round = 0;
@@ -478,6 +490,52 @@ void RefreshLocalLed() { status_led.SetState(stubuddy::LocalWaitingLedState(RawB
     }
 }
 
+esp_err_t PlayNetworkCue(stubuddy::WifiCue cue) {
+    if (cue == stubuddy::WifiCue::None)
+        return ESP_OK;
+    SpeakerOutput speaker;
+    ESP_RETURN_ON_ERROR(speaker.Initialize(), kTag, "Network cue init failed");
+    ESP_RETURN_ON_ERROR(speaker.EnableAmplifier(), kTag, "Network cue amplifier failed");
+    status_led.SetState(LedState::Playback);
+    const float first = cue == stubuddy::WifiCue::Connected ? 660.0f
+                        : cue == stubuddy::WifiCue::Setup   ? 440.0f
+                                                            : 220.0f;
+    const float second = cue == stubuddy::WifiCue::Connected ? 880.0f : first;
+    ESP_RETURN_ON_ERROR(speaker.WriteTone(first), kTag, "Network cue failed");
+    ESP_RETURN_ON_ERROR(speaker.WriteSilence(80), kTag, "Network cue gap failed");
+    ESP_RETURN_ON_ERROR(speaker.WriteTone(second), kTag, "Network cue failed");
+    ESP_RETURN_ON_ERROR(speaker.Finish(), kTag, "Network cue shutdown failed");
+    status_led.SetState(LedState::Idle);
+    return ESP_OK;
+}
+
+[[maybe_unused]] esp_err_t StartWifiSetup() {
+    ESP_RETURN_ON_ERROR(InitializeMainButton(), kTag, "Boot button setup failed");
+    const bool initially_pressed = RawButtonPressed();
+    if (initially_pressed)
+        vTaskDelay(pdMS_TO_TICKS(30));
+    const bool force_setup = stubuddy::BootSetupRequested(initially_pressed, RawButtonPressed());
+    status_led.SetState(LedState::Idle);
+    if (force_setup)
+        ESP_LOGI(kTag, "BOOT BUTTON: immediate WiFi setup requested; saved networks retained");
+    ESP_RETURN_ON_ERROR(wifi_setup.Start(status_led, force_setup), kTag,
+                        "WiFi setup startup failed");
+    while (!wifi_setup.online()) {
+        if (wifi_setup.failed())
+            return ESP_FAIL;
+        const auto cue = wifi_setup.TakeCue();
+        if (cue != stubuddy::WifiCue::Connected) {
+            ESP_RETURN_ON_ERROR(PlayNetworkCue(cue), kTag, "Network prompt failed");
+        }
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+    wifi_setup.TakeCue();
+    ESP_RETURN_ON_ERROR(PlayNetworkCue(stubuddy::WifiCue::Connected), kTag,
+                        "Connected prompt failed");
+    ESP_LOGI(kTag, "WiFi ready; entering the validated local audio test");
+    return ESP_OK;
+}
+
 esp_err_t RunSelfTest() {
     // Construct first so all subsequent error paths leave CTRL low.
     SpeakerOutput speaker;
@@ -491,7 +549,7 @@ esp_err_t RunSelfTest() {
     ESP_RETURN_ON_FALSE(flash_size == (16U << 20) && psram_size == (8U << 20), ESP_ERR_INVALID_SIZE,
                         kTag, "Expected N16R8: 16 MiB flash and 8 MiB PSRAM");
 
-    ESP_LOGI(kTag, "START in 2 seconds; fixed 3%% prompt peak; no networking");
+    ESP_LOGI(kTag, "START in 2 seconds; fixed 3%% prompt peak; local audio diagnostic");
     vTaskDelay(pdMS_TO_TICKS(2000));
     ESP_RETURN_ON_ERROR(speaker.EnableAmplifier(), kTag, "Amplifier startup failed");
 #ifdef CONFIG_STUBUDDY_AUDIO_LOOPBACK
@@ -535,16 +593,24 @@ extern "C" void app_main() {
         return;
     }
 #if defined(CONFIG_STUBUDDY_AUDIO_LOOPBACK) && defined(CONFIG_STUBUDDY_BUTTON_PTT)
-    ESP_LOGI(kTag, "stubuddy-s3-n16r8 audio self-test v0.4.3 / BUTTON-PTT / speaker RIGHT");
+    ESP_LOGI(kTag, "stubuddy-s3-n16r8 audio self-test v0.5.4 / BUTTON-PTT / speaker RIGHT");
 #elif defined(CONFIG_STUBUDDY_AUDIO_LOOPBACK)
-    ESP_LOGI(kTag, "stubuddy-s3-n16r8 audio self-test v0.4.3 / RECORD-REPLAY / speaker RIGHT");
+    ESP_LOGI(kTag, "stubuddy-s3-n16r8 audio self-test v0.5.4 / RECORD-REPLAY / speaker RIGHT");
 #else
-    ESP_LOGI(kTag, "stubuddy-s3-n16r8 audio self-test v0.4.3 / THREE-TONE / speaker RIGHT");
+    ESP_LOGI(kTag, "stubuddy-s3-n16r8 audio self-test v0.5.4 / THREE-TONE / speaker RIGHT");
 #endif
 #ifdef CONFIG_STUBUDDY_LED_ERROR_DEMO
     status_led.SetState(LedState::Error);
     ESP_LOGW(kTag, "LED ERROR DEMO: audio skipped; disable demo in menuconfig to resume");
     return;
+#endif
+#ifdef CONFIG_STUBUDDY_SOFTAP_SETUP
+    const esp_err_t network_result = StartWifiSetup();
+    if (network_result != ESP_OK) {
+        status_led.SetState(LedState::Error);
+        ESP_LOGE(kTag, "WiFi startup failed: %s", esp_err_to_name(network_result));
+        return;
+    }
 #endif
     const esp_err_t result = RunSelfTest();
     if (result == ESP_OK) {

@@ -18,6 +18,7 @@ public:
 
     esp_err_t Initialize();
     void SetState(LedState state);
+    void SetNetworkState(NetworkLedState state);
 
 private:
     static void OnTick(void* context);
@@ -26,6 +27,8 @@ private:
     esp_timer_handle_t timer_ = nullptr;
     portMUX_TYPE mutex_ = portMUX_INITIALIZER_UNLOCKED;
     LedState state_ = LedState::Idle;
+    LedState audio_state_ = LedState::Idle;
+    NetworkLedState network_state_ = NetworkLedState::None;
     unsigned epoch_ms_ = 0;
     unsigned last_duty_ = kLedMaxDuty + 1;
     bool output_error_logged_ = false;

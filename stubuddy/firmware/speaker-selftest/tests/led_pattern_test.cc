@@ -1,10 +1,28 @@
 #include "../main/led_pattern.h"
 
 constexpr bool LedPatternsPass() {
+    using stubuddy::EffectiveLedState;
     using stubuddy::kLedMaxDuty;
     using stubuddy::LedBrightness;
     using stubuddy::LedState;
     using stubuddy::LocalWaitingLedState;
+    using stubuddy::NetworkLedState;
+
+    if (EffectiveLedState(LedState::Idle, NetworkLedState::Setup) != LedState::WifiSetup ||
+        EffectiveLedState(LedState::Idle, NetworkLedState::Connecting) !=
+            LedState::WifiConnecting ||
+        EffectiveLedState(LedState::Recording, NetworkLedState::Setup) != LedState::Recording ||
+        EffectiveLedState(LedState::Playback, NetworkLedState::Connecting) != LedState::Playback ||
+        EffectiveLedState(LedState::Idle, NetworkLedState::None) != LedState::Idle ||
+        EffectiveLedState(LedState::Idle, NetworkLedState::RetryError) != LedState::Error ||
+        EffectiveLedState(LedState::Playback, NetworkLedState::Fault) != LedState::Error)
+        return false;
+    for (unsigned ms = 0; ms < 3000; ++ms) {
+        if (LedBrightness(LedState::WifiSetup, ms) != LedBrightness(LedState::ModelWaiting, ms) ||
+            LedBrightness(LedState::WifiConnecting, ms) !=
+                LedBrightness(LedState::ModelWaiting, ms))
+            return false;
+    }
 
     // Idle stays dark; key holds, recording and playback stay lit throughout.
     for (unsigned ms = 0; ms <= 65000; ms += 20) {
@@ -23,7 +41,7 @@ constexpr bool LedPatternsPass() {
             return false;
         }
     }
-    // Reserved model-only breath: no offline code path selects this state.
+    // The model waiting state is reserved; network waits share its smooth ramp.
     for (unsigned ms = 1; ms <= 1000; ++ms) {
         const unsigned up = LedBrightness(LedState::ModelWaiting, ms);
         if (up < LedBrightness(LedState::ModelWaiting, ms - 1) || up > kLedMaxDuty ||

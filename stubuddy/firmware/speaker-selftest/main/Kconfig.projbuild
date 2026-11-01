@@ -1,5 +1,13 @@
 menu "stubuddy audio diagnostics"
 
+config STUBUDDY_SOFTAP_SETUP
+    bool "Enable SoftAP WiFi setup before the local audio test"
+    default y
+    help
+        Open hotspot with a captive setup page and five saved networks.
+        Press GPIO15 at power-on to reconfigure immediately after debounce.
+        Bluetooth is not used.
+
 config STUBUDDY_AUDIO_LOOPBACK
     bool "Enable microphone record and replay diagnostics"
     default y
