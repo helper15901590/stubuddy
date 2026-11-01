@@ -1,4 +1,5 @@
 #include "board_config.h"
+#include "ptt_button.h"
 
 #include <driver/i2s_pdm.h>
 #include <driver/i2s_std.h>
@@ -7,6 +8,7 @@
 #include <esp_heap_caps.h>
 #include <esp_log.h>
 #include <esp_psram.h>
+#include <esp_timer.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 
@@ -15,6 +17,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <memory>
 
 #ifndef CONFIG_IDF_TARGET_ESP32S3
@@ -338,6 +341,96 @@ struct RecordingDeleter {
     return ESP_OK;
 }
 
+unsigned Milliseconds() { return static_cast<unsigned>(esp_timer_get_time() / 1000); }
+
+bool RawButtonPressed() { return gpio_get_level(stubuddy::kMainButton) == 0; }
+
+[[maybe_unused]] esp_err_t ButtonRecordAndReplay() {
+    constexpr size_t max_samples = kSampleRate * 10;
+    constexpr size_t min_samples = kSampleRate * 300 / 1000;
+    constexpr size_t poll_samples = kSampleRate / 100;
+    std::unique_ptr<int16_t, RecordingDeleter> recording(static_cast<int16_t*>(
+        heap_caps_malloc(max_samples * sizeof(int16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)));
+    ESP_RETURN_ON_FALSE(recording != nullptr, ESP_ERR_NO_MEM, kTag,
+                        "Cannot allocate 320000-byte PTT recording buffer");
+
+    gpio_config_t config = {};
+    config.pin_bit_mask = 1ULL << stubuddy::kMainButton;
+    config.mode = GPIO_MODE_INPUT;
+    config.pull_up_en = GPIO_PULLUP_ENABLE;
+    config.pull_down_en = GPIO_PULLDOWN_DISABLE;
+    config.intr_type = GPIO_INTR_DISABLE;
+    ESP_RETURN_ON_ERROR(gpio_config(&config), kTag, "GPIO15 button init failed");
+    stubuddy::PttButton button;
+    std::array<int16_t, poll_samples> discard = {};
+    unsigned round = 0;
+
+    while (true) {
+        MicrophoneInput microphone;
+        ESP_RETURN_ON_ERROR(microphone.Initialize(), kTag, "PTT microphone startup failed");
+        // Warm up before arming the key, so the first word isn't discarded.
+        // Idle samples are drained but never retained in the recording buffer.
+        for (int i = 0; i < 20; ++i) {
+            ESP_RETURN_ON_ERROR(microphone.Read(discard.data(), discard.size()), kTag,
+                                "PTT microphone warmup failed");
+        }
+        ESP_LOGI(kTag, "WAIT RELEASE: release GPIO15 before the next recording");
+        button.RequireRelease(RawButtonPressed(), Milliseconds());
+        while (button.pressed()) {
+            ESP_RETURN_ON_ERROR(microphone.Read(discard.data(), discard.size()), kTag,
+                                "PTT release gate read failed");
+            button.Update(RawButtonPressed(), Milliseconds());
+        }
+        ESP_LOGI(kTag, "IDLE: hold GPIO15 to record; release to replay (0.3-10 seconds)");
+        while (!button.pressed()) {
+            ESP_RETURN_ON_ERROR(microphone.Read(discard.data(), discard.size()), kTag,
+                                "PTT idle read failed");
+            button.Update(RawButtonPressed(), Milliseconds());
+        }
+
+        size_t count = 0;
+        ESP_LOGI(kTag, "REC START: round=%u; amplifier OFF", ++round);
+        while (count < max_samples && button.pressed()) {
+            const size_t frames = std::min(poll_samples, max_samples - count);
+            ESP_RETURN_ON_ERROR(microphone.Read(recording.get() + count, frames), kTag,
+                                "PTT recording failed");
+            count += frames;
+            button.Update(RawButtonPressed(), Milliseconds());
+        }
+        ESP_RETURN_ON_ERROR(microphone.Close(), kTag, "Cannot stop PTT microphone");
+        const bool limit_reached = count == max_samples;
+        ESP_LOGI(kTag, "REC STOP: samples=%u, duration=%u ms, reason=%s; microphone OFF",
+                 static_cast<unsigned>(count), static_cast<unsigned>(count * 1000 / kSampleRate),
+                 limit_reached ? "LIMIT" : "RELEASE");
+        if (limit_reached) {
+            ESP_LOGI(kTag, "LIMIT: 10 seconds reached; waiting for release before replay");
+            while (button.pressed()) {
+                vTaskDelay(pdMS_TO_TICKS(10));
+                button.Update(RawButtonPressed(), Milliseconds());
+            }
+        }
+        if (count < min_samples) {
+            ESP_LOGI(kTag, "DROP: recording shorter than 300 ms; no replay");
+        } else {
+            SpeakerOutput speaker;
+            ESP_RETURN_ON_ERROR(speaker.Initialize(), kTag, "PTT replay output init failed");
+            ESP_RETURN_ON_ERROR(speaker.EnableAmplifier(), kTag, "PTT amplifier startup failed");
+            ESP_LOGI(kTag, "REPLAY START: round=%u; button presses ignored until next IDLE", round);
+            ESP_RETURN_ON_ERROR(speaker.PlayRecording(recording.get(), count), kTag,
+                                "PTT replay failed");
+            ESP_RETURN_ON_ERROR(speaker.Finish(), kTag, "PTT replay shutdown failed");
+            ESP_LOGI(kTag, "REPLAY STOP: amplifier OFF");
+        }
+        // Reuse a single bounded PSRAM allocation across rounds and erase used audio.
+        std::memset(recording.get(), 0, count * sizeof(int16_t));
+        ESP_LOGI(kTag, "ROUND DONE: %u; internal_free=%u, PSRAM_free=%u", round,
+                 static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
+                 static_cast<unsigned>(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)));
+        // A fresh release gate drops presses made during playback, including a
+        // button held down across playback completion. It never starts a new recording.
+    }
+}
+
 esp_err_t RunSelfTest() {
     // Construct first so all subsequent error paths leave CTRL low.
     SpeakerOutput speaker;
@@ -355,11 +448,19 @@ esp_err_t RunSelfTest() {
     vTaskDelay(pdMS_TO_TICKS(2000));
     ESP_RETURN_ON_ERROR(speaker.EnableAmplifier(), kTag, "Amplifier startup failed");
 #ifdef CONFIG_STUBUDDY_AUDIO_LOOPBACK
+#ifdef CONFIG_STUBUDDY_BUTTON_PTT
+    ESP_LOGI(kTag, "PROMPT: wait for IDLE, then hold GPIO15 to record");
+#else
     ESP_LOGI(kTag, "PROMPT: recording will begin after the tone and a short silence");
+#endif
     ESP_RETURN_ON_ERROR(speaker.WriteTone(660.0f), kTag, "Prompt failed");
     ESP_RETURN_ON_ERROR(speaker.Finish(), kTag, "Prompt shutdown failed");
     vTaskDelay(pdMS_TO_TICKS(300));
+#ifdef CONFIG_STUBUDDY_BUTTON_PTT
+    return ButtonRecordAndReplay();
+#else
     return RecordAndReplay();
+#endif
 #else
     for (int repetition = 1; repetition <= kRepetitions; ++repetition) {
         ESP_LOGI(kTag, "PLAY %d/%d: 440 Hz -> 660 Hz", repetition, kRepetitions);
@@ -377,10 +478,12 @@ esp_err_t RunSelfTest() {
 }  // namespace
 
 extern "C" void app_main() {
-#ifdef CONFIG_STUBUDDY_AUDIO_LOOPBACK
-    ESP_LOGI(kTag, "stubuddy-s3-n16r8 audio self-test v0.2.0 / RECORD-REPLAY / speaker RIGHT");
+#if defined(CONFIG_STUBUDDY_AUDIO_LOOPBACK) && defined(CONFIG_STUBUDDY_BUTTON_PTT)
+    ESP_LOGI(kTag, "stubuddy-s3-n16r8 audio self-test v0.3.0 / BUTTON-PTT / speaker RIGHT");
+#elif defined(CONFIG_STUBUDDY_AUDIO_LOOPBACK)
+    ESP_LOGI(kTag, "stubuddy-s3-n16r8 audio self-test v0.3.0 / RECORD-REPLAY / speaker RIGHT");
 #else
-    ESP_LOGI(kTag, "stubuddy-s3-n16r8 audio self-test v0.2.0 / THREE-TONE / speaker RIGHT");
+    ESP_LOGI(kTag, "stubuddy-s3-n16r8 audio self-test v0.3.0 / THREE-TONE / speaker RIGHT");
 #endif
     const esp_err_t result = RunSelfTest();
     if (result == ESP_OK) {

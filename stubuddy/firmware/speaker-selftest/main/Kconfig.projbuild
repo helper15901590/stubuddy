@@ -1,10 +1,18 @@
 menu "stubuddy audio diagnostics"
 
 config STUBUDDY_AUDIO_LOOPBACK
-    bool "Record five seconds and play back once"
+    bool "Enable microphone record and replay diagnostics"
     default y
     help
         Disable to run the previously validated three-pass speaker test.
+
+config STUBUDDY_BUTTON_PTT
+    bool "Hold GPIO15 to record, release to replay"
+    depends on STUBUDDY_AUDIO_LOOPBACK
+    default y
+    help
+        Record 0.3 to 10 seconds per press, then replay and return to idle.
+        Disable to run the previously validated automatic five-second test.
 
 config STUBUDDY_MIC_RIGHT_SLOT
     bool "Use the right PDM microphone slot"
