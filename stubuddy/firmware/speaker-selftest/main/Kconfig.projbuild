@@ -1,0 +1,16 @@
+menu "stubuddy audio diagnostics"
+
+config STUBUDDY_AUDIO_LOOPBACK
+    bool "Record five seconds and play back once"
+    default y
+    help
+        Disable to run the previously validated three-pass speaker test.
+
+config STUBUDDY_MIC_RIGHT_SLOT
+    bool "Use the right PDM microphone slot"
+    depends on STUBUDDY_AUDIO_LOOPBACK
+    default n
+    help
+        Must match the microphone L/R wiring. Default is the left slot.
+
+endmenu

@@ -1,8 +1,10 @@
 #include "board_config.h"
 
+#include <driver/i2s_pdm.h>
 #include <driver/i2s_std.h>
 #include <esp_check.h>
 #include <esp_flash.h>
+#include <esp_heap_caps.h>
 #include <esp_log.h>
 #include <esp_psram.h>
 #include <freertos/FreeRTOS.h>
@@ -13,6 +15,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 
 #ifndef CONFIG_IDF_TARGET_ESP32S3
 #error "This diagnostic is for the ESP32-S3-WROOM-1-N16R8 only."
@@ -29,6 +32,7 @@ constexpr uint32_t kWriteTimeoutMs = 1000;
 constexpr uint32_t kToneMs = 180;
 constexpr uint32_t kFadeMs = 10;
 constexpr int kRepetitions = 3;
+constexpr size_t kRecordingSamples = kSampleRate * 5;
 constexpr float kPi = 3.14159265358979323846f;
 // Fixed 3% digital full-scale peak, independent of any saved user volume.
 constexpr float kPeak16Bit = 983.0f;
@@ -58,7 +62,7 @@ public:
         ESP_RETURN_ON_ERROR(gpio_config(&gpio), kTag, "Cannot configure amplifier CTRL");
         ctrl_ready_ = true;
 
-        // Reserve I2S0 for PDM capture in a future, separately validated step.
+        // Speaker TX and PDM RX use independent I2S controllers.
         i2s_chan_config_t channel = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_1, I2S_ROLE_MASTER);
         channel.dma_desc_num = kDmaDescriptors;
         channel.dma_frame_num = kFramesPerBlock;
@@ -86,7 +90,7 @@ public:
                             "Incomplete silence preload");
         ESP_RETURN_ON_ERROR(i2s_channel_enable(tx_), kTag, "Cannot start I2S1 TX");
         running_ = true;
-        ESP_LOGI(kTag, "I2S1 ready: 16000 Hz, 32-bit L/R slots; LEFT=silence, RIGHT=tone");
+        ESP_LOGI(kTag, "I2S1 ready: 16000 Hz, 32-bit L/R slots; LEFT=silence, RIGHT=audio");
         return ESP_OK;
     }
 
@@ -126,6 +130,50 @@ public:
                 block[frame * kChannels + 1] = sample * 65536;
             }
             ESP_RETURN_ON_ERROR(Write(block, frames), kTag, "Tone write failed");
+            offset += frames;
+        }
+        return ESP_OK;
+    }
+
+    esp_err_t PlayRecording(const int16_t* samples, size_t count) {
+        int64_t sum = 0;
+        for (size_t i = 0; i < count; ++i) {
+            sum += samples[i];
+        }
+        const int32_t mean = static_cast<int32_t>(sum / static_cast<int64_t>(count));
+        int32_t peak = 0;
+        size_t clipped = 0;
+        double energy = 0;
+        for (size_t i = 0; i < count; ++i) {
+            const int32_t centered = static_cast<int32_t>(samples[i]) - mean;
+            peak = std::max(peak, std::abs(centered));
+            energy += static_cast<double>(centered) * centered;
+            clipped += samples[i] == INT16_MIN || samples[i] == INT16_MAX;
+        }
+        // Remove DC and limit playback peak to the validated tone's 3% level.
+        // Bound gain to avoid turning a disconnected/quiet input into loud noise.
+        const float gain = peak > 0 ? std::min(8.0f, kPeak16Bit / peak) : 0.0f;
+        ESP_LOGI(kTag, "CAPTURE: samples=%u, DC=%ld, peak=%ld, RMS=%.1f, clipped=%u, gain=%.2f",
+                 static_cast<unsigned>(count), static_cast<long>(mean), static_cast<long>(peak),
+                 std::sqrt(energy / count), static_cast<unsigned>(clipped),
+                 static_cast<double>(gain));
+        if (peak < 16) {
+            ESP_LOGW(kTag, "Very low input: check PDM slot, microphone power and wiring");
+        }
+        AudioBlock block = {};
+        constexpr size_t fade_frames = kFadeMs * (kSampleRate / 1000);
+        for (size_t offset = 0; offset < count;) {
+            const size_t frames = std::min(count - offset, kFramesPerBlock);
+            for (size_t frame = 0; frame < frames; ++frame) {
+                const size_t index = offset + frame;
+                const size_t edge = std::min(index, count - 1 - index);
+                const float envelope = std::min(1.0f, static_cast<float>(edge) / fade_frames);
+                const int32_t centered = static_cast<int32_t>(samples[index]) - mean;
+                const auto sample = static_cast<int32_t>(centered * gain * envelope);
+                block[frame * kChannels] = 0;
+                block[frame * kChannels + 1] = sample * 65536;
+            }
+            ESP_RETURN_ON_ERROR(Write(block, frames), kTag, "Recorded audio write failed");
             offset += frames;
         }
         return ESP_OK;
@@ -186,6 +234,110 @@ private:
     bool running_ = false;
 };
 
+class MicrophoneInput {
+public:
+    ~MicrophoneInput() {
+        if (Close() != ESP_OK) {
+            ESP_LOGE(kTag, "PDM cleanup failed");
+        }
+    }
+
+    esp_err_t Initialize() {
+        i2s_chan_config_t channel = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
+        channel.dma_desc_num = 6;
+        channel.dma_frame_num = 256;
+        ESP_RETURN_ON_ERROR(i2s_new_channel(&channel, nullptr, &rx_), kTag,
+                            "PDM allocation failed");
+        i2s_pdm_rx_config_t config = {};
+        config.clk_cfg = I2S_PDM_RX_CLK_DEFAULT_CONFIG(kSampleRate);
+        config.slot_cfg =
+            I2S_PDM_RX_SLOT_PCM_FMT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_MONO);
+#ifdef CONFIG_STUBUDDY_MIC_RIGHT_SLOT
+        config.slot_cfg.slot_mask = I2S_PDM_SLOT_RIGHT;
+#else
+        config.slot_cfg.slot_mask = I2S_PDM_SLOT_LEFT;
+#endif
+        config.gpio_cfg.clk = stubuddy::kMicrophoneClock;
+        config.gpio_cfg.din = stubuddy::kMicrophoneData;
+        ESP_RETURN_ON_ERROR(i2s_channel_init_pdm_rx_mode(rx_, &config), kTag, "PDM init failed");
+        ESP_RETURN_ON_ERROR(i2s_channel_enable(rx_), kTag, "PDM enable failed");
+        running_ = true;
+        ESP_LOGI(kTag, "PDM ready: I2S0 CLK=3 DATA=42, 16000 Hz PCM, slot=%s",
+                 config.slot_cfg.slot_mask == I2S_PDM_SLOT_LEFT ? "LEFT" : "RIGHT");
+        return ESP_OK;
+    }
+
+    esp_err_t Read(int16_t* samples, size_t count) {
+        size_t offset = 0;
+        while (offset < count) {
+            const size_t requested = std::min<size_t>(count - offset, 256) * sizeof(int16_t);
+            size_t received = 0;
+            ESP_RETURN_ON_ERROR(i2s_channel_read(rx_, samples + offset, requested, &received, 1000),
+                                kTag, "PDM read timeout/error");
+            ESP_RETURN_ON_FALSE(received > 0 && received <= requested && received % 2 == 0,
+                                ESP_ERR_INVALID_SIZE, kTag, "Invalid PDM read size");
+            offset += received / sizeof(int16_t);
+        }
+        return ESP_OK;
+    }
+
+    esp_err_t Close() {
+        if (running_) {
+            const esp_err_t result = i2s_channel_disable(rx_);
+            if (result != ESP_OK) {
+                return result;
+            }
+            running_ = false;
+        }
+        if (rx_ != nullptr) {
+            const esp_err_t result = i2s_del_channel(rx_);
+            if (result != ESP_OK) {
+                return result;
+            }
+            rx_ = nullptr;
+        }
+        return ESP_OK;
+    }
+
+private:
+    i2s_chan_handle_t rx_ = nullptr;
+    bool running_ = false;
+};
+
+struct RecordingDeleter {
+    void operator()(int16_t* data) const { heap_caps_free(data); }
+};
+
+[[maybe_unused]] esp_err_t RecordAndReplay() {
+    std::unique_ptr<int16_t, RecordingDeleter> recording(static_cast<int16_t*>(heap_caps_malloc(
+        kRecordingSamples * sizeof(int16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)));
+    ESP_RETURN_ON_FALSE(recording != nullptr, ESP_ERR_NO_MEM, kTag,
+                        "Cannot allocate 160000-byte PSRAM buffer");
+    MicrophoneInput microphone;
+    ESP_RETURN_ON_ERROR(microphone.Initialize(), kTag, "Microphone startup failed");
+    // Discard 200 ms of samples to settle the microphone/PDM converter.
+    std::array<int16_t, 160> discard = {};
+    for (int i = 0; i < 20; ++i) {
+        ESP_RETURN_ON_ERROR(microphone.Read(discard.data(), discard.size()), kTag,
+                            "PDM warmup failed");
+    }
+    ESP_LOGI(kTag, "REC START: speak now, 5 seconds; amplifier OFF");
+    ESP_RETURN_ON_ERROR(microphone.Read(recording.get(), kRecordingSamples), kTag,
+                        "Recording failed");
+    ESP_RETURN_ON_ERROR(microphone.Close(), kTag, "Cannot stop microphone");
+    ESP_LOGI(kTag, "REC STOP: 80000 samples / 160000 bytes; microphone OFF");
+
+    SpeakerOutput speaker;
+    ESP_RETURN_ON_ERROR(speaker.Initialize(), kTag, "Replay output init failed");
+    ESP_RETURN_ON_ERROR(speaker.EnableAmplifier(), kTag, "Replay amplifier startup failed");
+    ESP_LOGI(kTag, "REPLAY START: playing the 5-second recording once");
+    ESP_RETURN_ON_ERROR(speaker.PlayRecording(recording.get(), kRecordingSamples), kTag,
+                        "Replay failed");
+    ESP_RETURN_ON_ERROR(speaker.Finish(), kTag, "Replay shutdown failed");
+    ESP_LOGI(kTag, "REPLAY STOP: amplifier OFF; recording buffer released on return");
+    return ESP_OK;
+}
+
 esp_err_t RunSelfTest() {
     // Construct first so all subsequent error paths leave CTRL low.
     SpeakerOutput speaker;
@@ -199,9 +351,16 @@ esp_err_t RunSelfTest() {
     ESP_RETURN_ON_FALSE(flash_size == (16U << 20) && psram_size == (8U << 20), ESP_ERR_INVALID_SIZE,
                         kTag, "Expected N16R8: 16 MiB flash and 8 MiB PSRAM");
 
-    ESP_LOGI(kTag, "START in 2 seconds; fixed 3%% PCM peak; no networking or recording");
+    ESP_LOGI(kTag, "START in 2 seconds; fixed 3%% prompt peak; no networking");
     vTaskDelay(pdMS_TO_TICKS(2000));
     ESP_RETURN_ON_ERROR(speaker.EnableAmplifier(), kTag, "Amplifier startup failed");
+#ifdef CONFIG_STUBUDDY_AUDIO_LOOPBACK
+    ESP_LOGI(kTag, "PROMPT: recording will begin after the tone and a short silence");
+    ESP_RETURN_ON_ERROR(speaker.WriteTone(660.0f), kTag, "Prompt failed");
+    ESP_RETURN_ON_ERROR(speaker.Finish(), kTag, "Prompt shutdown failed");
+    vTaskDelay(pdMS_TO_TICKS(300));
+    return RecordAndReplay();
+#else
     for (int repetition = 1; repetition <= kRepetitions; ++repetition) {
         ESP_LOGI(kTag, "PLAY %d/%d: 440 Hz -> 660 Hz", repetition, kRepetitions);
         ESP_RETURN_ON_ERROR(speaker.WriteTone(440.0f), kTag, "First tone failed");
@@ -212,12 +371,17 @@ esp_err_t RunSelfTest() {
         }
     }
     return speaker.Finish();
+#endif
 }
 
 }  // namespace
 
 extern "C" void app_main() {
-    ESP_LOGI(kTag, "stubuddy-s3-n16r8 speaker self-test v0.1.0 / RIGHT channel");
+#ifdef CONFIG_STUBUDDY_AUDIO_LOOPBACK
+    ESP_LOGI(kTag, "stubuddy-s3-n16r8 audio self-test v0.2.0 / RECORD-REPLAY / speaker RIGHT");
+#else
+    ESP_LOGI(kTag, "stubuddy-s3-n16r8 audio self-test v0.2.0 / THREE-TONE / speaker RIGHT");
+#endif
     const esp_err_t result = RunSelfTest();
     if (result == ESP_OK) {
         ESP_LOGI(kTag, "DONE: amplifier off; waiting for reset (audibility is a manual check)");
