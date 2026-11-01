@@ -1,5 +1,6 @@
 #include "board_config.h"
 #include "ptt_button.h"
+#include "status_led.h"
 
 #include <driver/i2s_pdm.h>
 #include <driver/i2s_std.h>
@@ -27,6 +28,8 @@
 namespace {
 
 constexpr char kTag[] = "STUBUDDY_SPEAKER";
+using stubuddy::LedState;
+stubuddy::StatusLed status_led;
 constexpr uint32_t kSampleRate = 16000;
 constexpr size_t kFramesPerBlock = 128;
 constexpr size_t kChannels = 2;
@@ -36,12 +39,39 @@ constexpr uint32_t kToneMs = 180;
 constexpr uint32_t kFadeMs = 10;
 constexpr int kRepetitions = 3;
 constexpr size_t kRecordingSamples = kSampleRate * 5;
+constexpr uint32_t kPttMaxSeconds = 60;
 constexpr float kPi = 3.14159265358979323846f;
 // Fixed 3% digital full-scale peak, independent of any saved user volume.
 constexpr float kPeak16Bit = 983.0f;
 using AudioBlock = std::array<int32_t, kFramesPerBlock * kChannels>;
 
 static_assert(kSampleRate % 1000 == 0);
+
+// GPIO10 belongs to the board for its entire lifetime. Repeated gpio_config()
+// calls reserve this same output again in IDF 6.1 and produce a conflict warning.
+// Only the main diagnostic task calls this function; later rounds only set level.
+esp_err_t InitializeAmplifierControl() {
+    static bool configured = false;
+    ESP_RETURN_ON_ERROR(gpio_set_level(stubuddy::kAmplifierCtrl, stubuddy::kAmplifierOff), kTag,
+                        "Cannot clear amplifier CTRL");
+    if (!configured) {
+        gpio_config_t gpio = {};
+        gpio.pin_bit_mask = 1ULL << stubuddy::kAmplifierCtrl;
+        gpio.mode = GPIO_MODE_OUTPUT;
+        gpio.pull_up_en = GPIO_PULLUP_DISABLE;
+        gpio.pull_down_en = GPIO_PULLDOWN_DISABLE;
+        gpio.intr_type = GPIO_INTR_DISABLE;
+        ESP_RETURN_ON_ERROR(gpio_config(&gpio), kTag, "Cannot configure amplifier CTRL");
+        configured = true;
+        ESP_LOGI(kTag, "CTRL GPIO10 configured once; subsequent playback only changes level");
+    }
+    return ESP_OK;
+}
+
+struct RecordingLevels {
+    int32_t mean;
+    float gain;
+};
 
 class SpeakerOutput {
 public:
@@ -53,16 +83,7 @@ public:
     }
 
     esp_err_t Initialize() {
-        // Set the output latch before enabling GPIO output to avoid a high pulse.
-        ESP_RETURN_ON_ERROR(gpio_set_level(stubuddy::kAmplifierCtrl, stubuddy::kAmplifierOff), kTag,
-                            "Cannot clear amplifier CTRL");
-        gpio_config_t gpio = {};
-        gpio.pin_bit_mask = 1ULL << stubuddy::kAmplifierCtrl;
-        gpio.mode = GPIO_MODE_OUTPUT;
-        gpio.pull_up_en = GPIO_PULLUP_DISABLE;
-        gpio.pull_down_en = GPIO_PULLDOWN_DISABLE;
-        gpio.intr_type = GPIO_INTR_DISABLE;
-        ESP_RETURN_ON_ERROR(gpio_config(&gpio), kTag, "Cannot configure amplifier CTRL");
+        ESP_RETURN_ON_ERROR(InitializeAmplifierControl(), kTag, "Amplifier CTRL init failed");
         ctrl_ready_ = true;
 
         // Speaker TX and PDM RX use independent I2S controllers.
@@ -138,7 +159,7 @@ public:
         return ESP_OK;
     }
 
-    esp_err_t PlayRecording(const int16_t* samples, size_t count) {
+    static RecordingLevels AnalyzeRecording(const int16_t* samples, size_t count) {
         int64_t sum = 0;
         for (size_t i = 0; i < count; ++i) {
             sum += samples[i];
@@ -163,6 +184,10 @@ public:
         if (peak < 16) {
             ESP_LOGW(kTag, "Very low input: check PDM slot, microphone power and wiring");
         }
+        return {mean, gain};
+    }
+
+    esp_err_t PlayRecording(const int16_t* samples, size_t count, const RecordingLevels& levels) {
         AudioBlock block = {};
         constexpr size_t fade_frames = kFadeMs * (kSampleRate / 1000);
         for (size_t offset = 0; offset < count;) {
@@ -171,8 +196,8 @@ public:
                 const size_t index = offset + frame;
                 const size_t edge = std::min(index, count - 1 - index);
                 const float envelope = std::min(1.0f, static_cast<float>(edge) / fade_frames);
-                const int32_t centered = static_cast<int32_t>(samples[index]) - mean;
-                const auto sample = static_cast<int32_t>(centered * gain * envelope);
+                const int32_t centered = static_cast<int32_t>(samples[index]) - levels.mean;
+                const auto sample = static_cast<int32_t>(centered * levels.gain * envelope);
                 block[frame * kChannels] = 0;
                 block[frame * kChannels + 1] = sample * 65536;
             }
@@ -324,19 +349,25 @@ struct RecordingDeleter {
         ESP_RETURN_ON_ERROR(microphone.Read(discard.data(), discard.size()), kTag,
                             "PDM warmup failed");
     }
+    status_led.SetState(LedState::Recording);
     ESP_LOGI(kTag, "REC START: speak now, 5 seconds; amplifier OFF");
     ESP_RETURN_ON_ERROR(microphone.Read(recording.get(), kRecordingSamples), kTag,
                         "Recording failed");
     ESP_RETURN_ON_ERROR(microphone.Close(), kTag, "Cannot stop microphone");
+    status_led.SetState(LedState::Idle);
     ESP_LOGI(kTag, "REC STOP: 80000 samples / 160000 bytes; microphone OFF");
 
+    const RecordingLevels levels =
+        SpeakerOutput::AnalyzeRecording(recording.get(), kRecordingSamples);
     SpeakerOutput speaker;
     ESP_RETURN_ON_ERROR(speaker.Initialize(), kTag, "Replay output init failed");
     ESP_RETURN_ON_ERROR(speaker.EnableAmplifier(), kTag, "Replay amplifier startup failed");
+    status_led.SetState(LedState::Playback);
     ESP_LOGI(kTag, "REPLAY START: playing the 5-second recording once");
-    ESP_RETURN_ON_ERROR(speaker.PlayRecording(recording.get(), kRecordingSamples), kTag,
+    ESP_RETURN_ON_ERROR(speaker.PlayRecording(recording.get(), kRecordingSamples, levels), kTag,
                         "Replay failed");
     ESP_RETURN_ON_ERROR(speaker.Finish(), kTag, "Replay shutdown failed");
+    status_led.SetState(LedState::Idle);
     ESP_LOGI(kTag, "REPLAY STOP: amplifier OFF; recording buffer released on return");
     return ESP_OK;
 }
@@ -345,14 +376,20 @@ unsigned Milliseconds() { return static_cast<unsigned>(esp_timer_get_time() / 10
 
 bool RawButtonPressed() { return gpio_get_level(stubuddy::kMainButton) == 0; }
 
+void RefreshLocalLed() { status_led.SetState(stubuddy::LocalWaitingLedState(RawButtonPressed())); }
+
 [[maybe_unused]] esp_err_t ButtonRecordAndReplay() {
-    constexpr size_t max_samples = kSampleRate * 10;
+    constexpr size_t max_samples = kSampleRate * kPttMaxSeconds;
+    constexpr size_t recording_bytes = max_samples * sizeof(int16_t);
     constexpr size_t min_samples = kSampleRate * 300 / 1000;
     constexpr size_t poll_samples = kSampleRate / 100;
     std::unique_ptr<int16_t, RecordingDeleter> recording(static_cast<int16_t*>(
-        heap_caps_malloc(max_samples * sizeof(int16_t), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)));
+        heap_caps_malloc(recording_bytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)));
     ESP_RETURN_ON_FALSE(recording != nullptr, ESP_ERR_NO_MEM, kTag,
-                        "Cannot allocate 320000-byte PTT recording buffer");
+                        "Cannot allocate %u-byte PTT recording buffer",
+                        static_cast<unsigned>(recording_bytes));
+    ESP_LOGI(kTag, "PTT CONFIG: max=%u seconds, buffer=%u bytes; timeout=auto-replay",
+             static_cast<unsigned>(kPttMaxSeconds), static_cast<unsigned>(recording_bytes));
 
     gpio_config_t config = {};
     config.pin_bit_mask = 1ULL << stubuddy::kMainButton;
@@ -366,6 +403,7 @@ bool RawButtonPressed() { return gpio_get_level(stubuddy::kMainButton) == 0; }
     unsigned round = 0;
 
     while (true) {
+        RefreshLocalLed();
         MicrophoneInput microphone;
         ESP_RETURN_ON_ERROR(microphone.Initialize(), kTag, "PTT microphone startup failed");
         // Warm up before arming the key, so the first word isn't discarded.
@@ -373,6 +411,7 @@ bool RawButtonPressed() { return gpio_get_level(stubuddy::kMainButton) == 0; }
         for (int i = 0; i < 20; ++i) {
             ESP_RETURN_ON_ERROR(microphone.Read(discard.data(), discard.size()), kTag,
                                 "PTT microphone warmup failed");
+            RefreshLocalLed();
         }
         ESP_LOGI(kTag, "WAIT RELEASE: release GPIO15 before the next recording");
         button.RequireRelease(RawButtonPressed(), Milliseconds());
@@ -380,15 +419,20 @@ bool RawButtonPressed() { return gpio_get_level(stubuddy::kMainButton) == 0; }
             ESP_RETURN_ON_ERROR(microphone.Read(discard.data(), discard.size()), kTag,
                                 "PTT release gate read failed");
             button.Update(RawButtonPressed(), Milliseconds());
+            RefreshLocalLed();
         }
-        ESP_LOGI(kTag, "IDLE: hold GPIO15 to record; release to replay (0.3-10 seconds)");
+        status_led.SetState(LedState::Idle);
+        ESP_LOGI(kTag, "IDLE: hold GPIO15 to record; release to replay (0.3-%u seconds)",
+                 static_cast<unsigned>(kPttMaxSeconds));
         while (!button.pressed()) {
             ESP_RETURN_ON_ERROR(microphone.Read(discard.data(), discard.size()), kTag,
                                 "PTT idle read failed");
             button.Update(RawButtonPressed(), Milliseconds());
+            RefreshLocalLed();
         }
 
         size_t count = 0;
+        status_led.SetState(LedState::Recording);
         ESP_LOGI(kTag, "REC START: round=%u; amplifier OFF", ++round);
         while (count < max_samples && button.pressed()) {
             const size_t frames = std::min(poll_samples, max_samples - count);
@@ -398,27 +442,30 @@ bool RawButtonPressed() { return gpio_get_level(stubuddy::kMainButton) == 0; }
             button.Update(RawButtonPressed(), Milliseconds());
         }
         ESP_RETURN_ON_ERROR(microphone.Close(), kTag, "Cannot stop PTT microphone");
+        // Recording has stopped. Preparation stays dark even if the timed-out
+        // press is still held; the lamp turns on only when PCM playback begins.
+        status_led.SetState(LedState::Idle);
         const bool limit_reached = count == max_samples;
         ESP_LOGI(kTag, "REC STOP: samples=%u, duration=%u ms, reason=%s; microphone OFF",
                  static_cast<unsigned>(count), static_cast<unsigned>(count * 1000 / kSampleRate),
                  limit_reached ? "LIMIT" : "RELEASE");
         if (limit_reached) {
-            ESP_LOGI(kTag, "LIMIT: 10 seconds reached; waiting for release before replay");
-            while (button.pressed()) {
-                vTaskDelay(pdMS_TO_TICKS(10));
-                button.Update(RawButtonPressed(), Milliseconds());
-            }
+            ESP_LOGI(kTag, "LIMIT: %u seconds reached; microphone OFF; LED OFF; automatic replay",
+                     static_cast<unsigned>(kPttMaxSeconds));
         }
         if (count < min_samples) {
             ESP_LOGI(kTag, "DROP: recording shorter than 300 ms; no replay");
         } else {
+            const RecordingLevels levels = SpeakerOutput::AnalyzeRecording(recording.get(), count);
             SpeakerOutput speaker;
             ESP_RETURN_ON_ERROR(speaker.Initialize(), kTag, "PTT replay output init failed");
             ESP_RETURN_ON_ERROR(speaker.EnableAmplifier(), kTag, "PTT amplifier startup failed");
+            status_led.SetState(LedState::Playback);
             ESP_LOGI(kTag, "REPLAY START: round=%u; button presses ignored until next IDLE", round);
-            ESP_RETURN_ON_ERROR(speaker.PlayRecording(recording.get(), count), kTag,
+            ESP_RETURN_ON_ERROR(speaker.PlayRecording(recording.get(), count, levels), kTag,
                                 "PTT replay failed");
             ESP_RETURN_ON_ERROR(speaker.Finish(), kTag, "PTT replay shutdown failed");
+            RefreshLocalLed();
             ESP_LOGI(kTag, "REPLAY STOP: amplifier OFF");
         }
         // Reuse a single bounded PSRAM allocation across rounds and erase used audio.
@@ -453,8 +500,10 @@ esp_err_t RunSelfTest() {
 #else
     ESP_LOGI(kTag, "PROMPT: recording will begin after the tone and a short silence");
 #endif
+    status_led.SetState(LedState::Playback);
     ESP_RETURN_ON_ERROR(speaker.WriteTone(660.0f), kTag, "Prompt failed");
     ESP_RETURN_ON_ERROR(speaker.Finish(), kTag, "Prompt shutdown failed");
+    status_led.SetState(LedState::Idle);
     vTaskDelay(pdMS_TO_TICKS(300));
 #ifdef CONFIG_STUBUDDY_BUTTON_PTT
     return ButtonRecordAndReplay();
@@ -463,11 +512,13 @@ esp_err_t RunSelfTest() {
 #endif
 #else
     for (int repetition = 1; repetition <= kRepetitions; ++repetition) {
+        status_led.SetState(LedState::Playback);
         ESP_LOGI(kTag, "PLAY %d/%d: 440 Hz -> 660 Hz", repetition, kRepetitions);
         ESP_RETURN_ON_ERROR(speaker.WriteTone(440.0f), kTag, "First tone failed");
         ESP_RETURN_ON_ERROR(speaker.WriteSilence(80), kTag, "Tone gap failed");
         ESP_RETURN_ON_ERROR(speaker.WriteTone(660.0f), kTag, "Second tone failed");
         if (repetition < kRepetitions) {
+            status_led.SetState(LedState::Idle);
             ESP_RETURN_ON_ERROR(speaker.WriteSilence(2000), kTag, "Repeat gap failed");
         }
     }
@@ -478,17 +529,29 @@ esp_err_t RunSelfTest() {
 }  // namespace
 
 extern "C" void app_main() {
+    const esp_err_t led_result = status_led.Initialize();
+    if (led_result != ESP_OK) {
+        ESP_LOGE(kTag, "LED init failed: %s; audio test not started", esp_err_to_name(led_result));
+        return;
+    }
 #if defined(CONFIG_STUBUDDY_AUDIO_LOOPBACK) && defined(CONFIG_STUBUDDY_BUTTON_PTT)
-    ESP_LOGI(kTag, "stubuddy-s3-n16r8 audio self-test v0.3.0 / BUTTON-PTT / speaker RIGHT");
+    ESP_LOGI(kTag, "stubuddy-s3-n16r8 audio self-test v0.4.3 / BUTTON-PTT / speaker RIGHT");
 #elif defined(CONFIG_STUBUDDY_AUDIO_LOOPBACK)
-    ESP_LOGI(kTag, "stubuddy-s3-n16r8 audio self-test v0.3.0 / RECORD-REPLAY / speaker RIGHT");
+    ESP_LOGI(kTag, "stubuddy-s3-n16r8 audio self-test v0.4.3 / RECORD-REPLAY / speaker RIGHT");
 #else
-    ESP_LOGI(kTag, "stubuddy-s3-n16r8 audio self-test v0.3.0 / THREE-TONE / speaker RIGHT");
+    ESP_LOGI(kTag, "stubuddy-s3-n16r8 audio self-test v0.4.3 / THREE-TONE / speaker RIGHT");
+#endif
+#ifdef CONFIG_STUBUDDY_LED_ERROR_DEMO
+    status_led.SetState(LedState::Error);
+    ESP_LOGW(kTag, "LED ERROR DEMO: audio skipped; disable demo in menuconfig to resume");
+    return;
 #endif
     const esp_err_t result = RunSelfTest();
     if (result == ESP_OK) {
+        status_led.SetState(LedState::Idle);
         ESP_LOGI(kTag, "DONE: amplifier off; waiting for reset (audibility is a manual check)");
     } else {
+        status_led.SetState(LedState::Error);
         ESP_LOGE(kTag, "FAIL: %s; test stopped, no automatic retry", esp_err_to_name(result));
     }
     // Returning deletes the main task. Idle tasks continue until reset/power cycle.

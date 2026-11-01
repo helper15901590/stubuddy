@@ -11,7 +11,8 @@ config STUBUDDY_BUTTON_PTT
     depends on STUBUDDY_AUDIO_LOOPBACK
     default y
     help
-        Record 0.3 to 10 seconds per press, then replay and return to idle.
+        Record 0.3 to 60 seconds per press. At 60 seconds stop capture and
+        replay automatically, even while the button remains held.
         Disable to run the previously validated automatic five-second test.
 
 config STUBUDDY_MIC_RIGHT_SLOT
@@ -20,5 +21,28 @@ config STUBUDDY_MIC_RIGHT_SLOT
     default n
     help
         Must match the microphone L/R wiring. Default is the left slot.
+
+choice STUBUDDY_LED_POLARITY
+    prompt "Status LED on GPIO18 polarity"
+    default STUBUDDY_LED_ACTIVE_LOW
+    help
+        The observed stubuddy board is active-low: a low GPIO level lights
+        the LED. A required choice also migrates old configs that left the
+        previous active-low boolean unset, instead of retaining active-high.
+
+config STUBUDDY_LED_ACTIVE_LOW
+    bool "Active-low (stubuddy board)"
+
+config STUBUDDY_LED_ACTIVE_HIGH
+    bool "Active-high (other wiring)"
+
+endchoice
+
+config STUBUDDY_LED_ERROR_DEMO
+    bool "Show error LED pattern instead of running audio diagnostics"
+    default n
+    help
+        Test-only: show three short flashes every two seconds, with audio
+        diagnostics skipped. Disable this option to resume normal operation.
 
 endmenu

@@ -1,8 +1,24 @@
-# stubuddy 按住录音、松开回放自检 v0.3.0
+# stubuddy 按键录放与白色LED自检 v0.4.3
 
 基线：扬声器三组提示音验收提交 `c19755c`；五秒录音回放验收提交 `abe579f`。
-当前原子检查点：GPIO15 按住录音、松开回放，连续操作无需重新上电。
-软件检查不代替本次按键真机验收。本工程仍是独立硬件诊断工程，不启动小智主程序。
+按键录放、误触过滤、十秒上限及连续十轮操作已验收并提交为 `9ea4039`。
+当前检查点：GPIO18灯光反馈与一分钟收音上限。软件检查不代替灯光与音频回归的真机验收。
+本工程仍是独立硬件诊断工程，不启动小智主程序。完整灯光测试步骤见 [LED-VALIDATION.md](LED-VALIDATION.md)。
+
+| 状态 | 白灯表现 | 串口标签 |
+| --- | --- | --- |
+| 待机 | 熄灭 | IDLE/OFF |
+| 有效按压、录音 | 常亮 | KEY_HELD/ON、RECORDING/ON |
+| 达到一分钟上限后的回放准备 | 熄灭，即使仍按住 | IDLE/OFF |
+| 录音 | 常亮 | RECORDING/ON |
+| 播放 | 常亮 | PLAYBACK/ON |
+| 无按键的本地准备、待机 | 熄灭 | IDLE/OFF |
+| 等待模型回复（预留） | 两秒一周期呼吸 | MODEL_WAITING/BREATH |
+| 音频错误并停止 | 三次短闪，停顿后重复 | ERROR/TRIPLE-FLASH |
+
+呼吸仅用于等待模型回复。当前离线自检不进入该状态，本轮不测试呼吸。
+根据实测亮度表现，GPIO18默认低电平点亮；极性改为必选项，旧的未勾选布尔配置会迁移到默认低电平。
+本地流程不触发呼吸；有效按住时常亮。达到一分钟上限后停止收音并强制灭灯，准备好后直接自动回放，回放时常亮，不等待松开。
 
 ## 硬件与行为
 
@@ -15,8 +31,8 @@
 | NS4168 CTRL | GPIO10 高电平使能右声道，低电平关闭 |
 | 麦克风 I2S0 | PDM CLK=GPIO3、DATA=GPIO42，沿用左采集时隙 |
 | 录音格式 | 16kHz、16位单声道 |
-| 录音范围 | 少于300ms丢弃，最长10秒 |
-| 缓存 | 一次分配320000字节PSRAM，逐轮复用并清除已用录音 |
+| 录音范围 | 少于300ms丢弃，最长60秒 |
+| 缓存 | 一次分配1920000字节PSRAM（约1.83MiB），逐轮复用并清除已用录音 |
 
 仍按已确认的 NS4168 5V VDD 条件测试；数字输入电平裕量未作为量产电气验收通过。
 扬声器右声道和麦克风采集时隙是独立配置。音量沿用上个验收版本：去直流，
@@ -30,8 +46,8 @@
 3. 等按键稳定松开，输出 `IDLE`，接受下一次按下。
 4. 确认按下后开始将声音保存到PSRAM；功放始终关闭。
 5. 确认松开时停止录音。少于300ms则打印 `DROP`，清除录音并准备下一轮。
-6. 到十秒时自动停止采集，打印 `LIMIT`；持续按住不会继续录音，松开才开始回放。
-7. 有效录音自动回放一次。回放期间的按下和松开均不排队执行。
+6. 到60秒时自动停止采集并灭灯，打印 `LIMIT`；不等待松开，自动准备并回放本次录音。
+7. 有效录音自动回放一次；分析音量期间灯灭，开始发送回放音频时灯亮。回放期间的按下和松开均不排队执行。
 8. 关闭功放、清除这轮录音。再次预热并确认按键松开后，返回 `IDLE`。
 
 如果按键从回放期间一直按到回放结束，停在 `WAIT RELEASE`，松开后才返回待机。
@@ -67,21 +83,22 @@ idf.py -p COM4 -b 115200 flash monitor
 ## 预期日志
 
 ```text
-stubuddy-s3-n16r8 audio self-test v0.3.0 / BUTTON-PTT / speaker RIGHT
+stubuddy-s3-n16r8 audio self-test v0.4.3 / BUTTON-PTT / speaker RIGHT
 WAIT RELEASE: release GPIO15 before the next recording
-IDLE: hold GPIO15 to record; release to replay (0.3-10 seconds)
+IDLE: hold GPIO15 to record; release to replay (0.3-60 seconds)
 REC START: round=1; amplifier OFF
 REC STOP: samples=..., duration=... ms, reason=RELEASE; microphone OFF
-REPLAY START: round=1; button presses ignored until next IDLE
 CAPTURE: samples=..., DC=..., peak=..., RMS=..., clipped=..., gain=...
+REPLAY START: round=1; button presses ignored until next IDLE
 REPLAY STOP: amplifier OFF
 ROUND DONE: 1; internal_free=..., PSRAM_free=...
 WAIT RELEASE: release GPIO15 before the next recording
-IDLE: hold GPIO15 to record; release to replay (0.3-10 seconds)
+IDLE: hold GPIO15 to record; release to replay (0.3-60 seconds)
 ```
 
 误触时应看到 `DROP` 而没有这轮的 `REPLAY START`；极短、未稳定30ms的触碰可能完全没有录音日志。
-十秒上限时应为 `samples=160000, duration=10000 ms, reason=LIMIT`。
+一分钟上限时应为 `samples=960000, duration=60000 ms, reason=LIMIT`。
+启动日志还应包含 `PTT CONFIG: max=60 seconds, buffer=1920000 bytes`。
 
 ## 人工验收
 
@@ -90,13 +107,19 @@ IDLE: hold GPIO15 to record; release to replay (0.3-10 seconds)
 | 待机 | 不按键，不自动录音或回放 |
 | 基本录放 | 看到IDLE后按住说一句话，松开自动回放一次，时长随按住变化 |
 | 误触 | 快速轻点约0.1秒，不回放；可能有DROP或无录音事件 |
-| 十秒上限 | 持续按住超过十秒，看到LIMIT后再说一句话；松开后回放不包含这句后说的话 |
+| 一分钟上限 | 持续按住超过60秒不松开：停止收音、灯灭，随后自动回放且灯亮，无需松开；回放不包含到限后新说的话 |
 | 回放期间按键 | 回放时轻点不启动下一轮；按住跨过回放结束时等待松开，不自动录音 |
 | 开机按住 | 按住GPIO15再上电，等待松开后才进入IDLE，不自动录音 |
 | 连续操作 | 完成十轮录放，无异常复位、无持续杂音；检查ROUND DONE内存是否持续下降 |
 
 按键需使用GPIO15的业务按键，BOOT/IO0是下载键。无反应时反馈完整启动日志与按下时的日志。
 回放无声或噪声时一并反馈CAPTURE统计，先保持当前已验收的音频配置。
+
+## 功放控制引脚生命周期
+
+GPIO10仅在第一次使用功放时调用一次GPIO配置，后续回放只切换高低电平。
+旧实现每轮重新配置同一个输出，会触发ESP-IDF 6.1的GPIO重复预留告警。
+本次没有关闭SDK日志或强制清除预留标记；应通过连续录放确认不再出现GPIO10冲突提示。
 
 ## 回测旧模式
 
@@ -114,8 +137,12 @@ IDLE: hold GPIO15 to record; release to replay (0.3-10 seconds)
 覆盖30ms边界、接点抖动、开机按住、回放期间操作和32位毫秒计数回绕。
 这些测试随默认工程一起编译，不占用运行期录音缓存；失败会阻止构建。
 
-2026-11-01：软件完整编译、分区检查和按键逻辑检查已通过。
-还验证了测试能拒绝故意注入的30ms边界错误。本次物理按键、采音质量和连续操作等待用户验收。
+`tests/led_pattern_test.cc` 随构建验证待机全暗、按键及录放常亮、本地等待不触发呼吸、预留模型等待曲线的范围/单调性/对称性/周期边界、
+以及错误三连闪的完整时序。状态与起始时刻在短临界区中同步；灯光由独立定时器任务每20ms更新，
+不在音频循环中等待灯效，不动态分配内存，也不获取音频锁。
+
+2026-11-01：默认模式完整编译、分区检查、灯光曲线与按键消抖检查通过。
+原按键录放已在 `9ea4039` 验收，本次待机灭灯、按住及录放常亮和音频回归等待用户验收；模型等待呼吸留到接入模型后测试。
 
 用户确认验收通过后才执行：
 
@@ -123,7 +150,7 @@ IDLE: hold GPIO15 to record; release to replay (0.3-10 seconds)
 Set-Location 'D:\Desktop\stubuddy'
 git add -- stubuddy/firmware/speaker-selftest
 git diff --cached --stat
-git commit -m "feat(audio): add hold-to-record button self-test" -m "Verify GPIO15 debounce, short-tap filtering, ten-second limit, and repeated record-replay cycles on hardware."
+git commit -m "feat(audio): add status LED and sixty-second automatic replay" -m "Verify active-low status feedback, automatic replay at the recording limit, and repeated playback without GPIO10 conflicts on hardware."
 git status --short
 ```
 
