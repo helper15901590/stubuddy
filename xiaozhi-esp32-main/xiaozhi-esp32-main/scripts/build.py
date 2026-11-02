@@ -1430,8 +1430,20 @@ def _configure_build(
     sdkconfig_append: list[str],
     board_name: str,
     preview: bool,
+    sdkconfig_defaults: Optional[list[str]] = None,
 ) -> None:
     """Configure target, board identity and sdkconfig defaults in one CMake run."""
+    defaults = []
+    if sdkconfig_defaults is not None:
+        if not isinstance(sdkconfig_defaults, list) or not sdkconfig_defaults:
+            raise ValueError("sdkconfig_defaults must contain at least one defaults file")
+        for item in sdkconfig_defaults:
+            if not isinstance(item, str) or not Path(item).is_file():
+                raise ValueError(f"Invalid sdkconfig defaults file: {item!r}")
+            defaults.append(Path(item).as_posix())
+    elif Path("sdkconfig.defaults").exists():
+        defaults.append("sdkconfig.defaults")
+
     sdkconfig = Path("sdkconfig")
     sdkconfig_old = Path("sdkconfig.old")
     if sdkconfig.exists():
@@ -1448,9 +1460,6 @@ def _configure_build(
         encoding="utf-8",
     )
 
-    defaults = []
-    if Path("sdkconfig.defaults").exists():
-        defaults.append("sdkconfig.defaults")
     defaults.append(fragment.as_posix())
     _run_idf(
         f"-DIDF_TARGET={target}",
@@ -1671,11 +1680,15 @@ def build_board(
         _emit_build_stage("dependencies_resolving")
         os.environ.pop("IDF_TARGET", None)
         _prepare_target(target, preview)
+        defaults_options = {}
+        if "sdkconfig_defaults" in build:
+            defaults_options["sdkconfig_defaults"] = build["sdkconfig_defaults"]
         _configure_build(
             target,
             sdkconfig_append,
             name,
             preview,
+            **defaults_options,
         )
         for symbols, option_name in validation_symbols:
             _validate_configured_symbols(symbols, option_name)

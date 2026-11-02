@@ -9,5 +9,14 @@ include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 # "Trim" the build. Include the minimal set of components, main, and anything it depends on.
 idf_build_set_property(MINIMAL_BUILD ON)
 
+# Make the release variant available during IDF's early dependency expansion.
+# Kconfig alone is not available in that pass. Other variants keep the full app.
+set(ENV{XIAOZHI_HEADLESS_STARTUP_PROFILE} "0")
+idf_build_set_property(XIAOZHI_HEADLESS_STARTUP OFF)
+if(BOARD_NAME STREQUAL "stubuddy-s3-n16r8-startup")
+    idf_build_set_property(XIAOZHI_HEADLESS_STARTUP ON)
+    set(ENV{XIAOZHI_HEADLESS_STARTUP_PROFILE} "1")
+endif()
+
 set(PROJECT_VER "2.5.2")
 project(xiaozhi)

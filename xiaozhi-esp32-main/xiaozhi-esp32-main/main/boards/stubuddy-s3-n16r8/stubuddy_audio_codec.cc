@@ -1,0 +1,182 @@
+#include "stubuddy_audio_codec.h"
+#include "config.h"
+
+#include <esp_log.h>
+#include <freertos/task.h>
+#include <algorithm>
+#include <array>
+
+namespace {
+constexpr char kTag[] = "STUBUDDY_CODEC";
+constexpr unsigned kWriteTimeoutMs = 1000;
+using StereoBlock = std::array<int32_t, stubuddy::kFramesPerBlock * 2>;
+}  // namespace
+
+StubuddyAudioCodec::StubuddyAudioCodec() {
+    input_sample_rate_ = stubuddy::kSampleRate;
+    output_sample_rate_ = stubuddy::kSampleRate;
+    input_channels_ = output_channels_ = 1;
+}
+
+StubuddyAudioCodec::~StubuddyAudioCodec() { Shutdown(); }
+
+esp_err_t StubuddyAudioCodec::Initialize() {
+    i2s_chan_config_t channel = I2S_CHANNEL_DEFAULT_CONFIG(XIAOZHI_I2S_PORT(1), I2S_ROLE_MASTER);
+    channel.dma_desc_num = stubuddy::kDmaDescriptors;
+    channel.dma_frame_num = stubuddy::kFramesPerBlock;
+    channel.auto_clear_after_cb = true;
+    esp_err_t result = i2s_new_channel(&channel, &tx_handle_, nullptr);
+    if (result != ESP_OK)
+        return result;
+    i2s_std_config_t config = {};
+    config.clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(stubuddy::kSampleRate);
+    config.slot_cfg =
+        I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_32BIT, I2S_SLOT_MODE_STEREO);
+    config.gpio_cfg.mclk = I2S_GPIO_UNUSED;
+    config.gpio_cfg.bclk = stubuddy::kSpeakerBclk;
+    config.gpio_cfg.ws = stubuddy::kSpeakerLrclk;
+    config.gpio_cfg.dout = stubuddy::kSpeakerData;
+    config.gpio_cfg.din = I2S_GPIO_UNUSED;
+    return i2s_channel_init_std_mode(tx_handle_, &config);
+}
+
+void StubuddyAudioCodec::Start() {
+    if (tx_handle_ || failed_)
+        return;
+    // Fixed diagnostic level. Do not read or overwrite persisted user volume.
+    output_volume_ = 100;
+    const esp_err_t result = Initialize();
+    if (result != ESP_OK)
+        Fail(result, "initialize I2S1");
+    else
+        ESP_LOGI(kTag, "AudioCodec ready: I2S1, 16000 Hz, 32-bit stereo; LEFT=0, RIGHT=PCM");
+}
+
+void StubuddyAudioCodec::EnableInput(bool enable) {
+    if (enable)
+        ESP_LOGW(kTag, "Microphone capture is reserved for checkpoint 3.2");
+    input_enabled_ = false;
+}
+
+esp_err_t StubuddyAudioCodec::WriteSlots(const int32_t* data, unsigned frames) {
+    const size_t expected = frames * 2 * sizeof(int32_t);
+    size_t written = 0;
+    const esp_err_t result =
+        i2s_channel_write(tx_handle_, data, expected, &written, kWriteTimeoutMs);
+    return result != ESP_OK ? result : written == expected ? ESP_OK : ESP_ERR_INVALID_SIZE;
+}
+
+esp_err_t StubuddyAudioCodec::WriteSilence(unsigned duration_ms) {
+    const StereoBlock silence = {};
+    unsigned remaining = duration_ms * (stubuddy::kSampleRate / 1000);
+    while (remaining) {
+        const unsigned frames = std::min(remaining, stubuddy::kFramesPerBlock);
+        const esp_err_t result = WriteSlots(silence.data(), frames);
+        if (result != ESP_OK)
+            return result;
+        remaining -= frames;
+    }
+    return ESP_OK;
+}
+
+void StubuddyAudioCodec::EnableOutput(bool enable) {
+    if (!enable) {
+        esp_err_t result = ESP_OK;
+        if (running_) {
+            result = WriteSilence(150);
+            if (result == ESP_OK) {
+                constexpr unsigned drain_ms =
+                    (stubuddy::kDmaDescriptors * stubuddy::kFramesPerBlock * 1000 +
+                     stubuddy::kSampleRate - 1) /
+                        stubuddy::kSampleRate +
+                    20;
+                vTaskDelay(pdMS_TO_TICKS(drain_ms));
+            }
+        }
+        const esp_err_t shutdown = Shutdown();
+        if (result != ESP_OK || shutdown != ESP_OK)
+            Fail(result != ESP_OK ? result : shutdown, "stop output");
+        else
+            ESP_LOGI(kTag, "OUTPUT OFF: CTRL=LOW; I2S1 released");
+        return;
+    }
+    if (output_enabled_ || failed_)
+        return;
+    Start();
+    if (!tx_handle_ || failed_)
+        return;
+    StereoBlock silence = {};
+    size_t loaded = 0;
+    esp_err_t result =
+        i2s_channel_preload_data(tx_handle_, silence.data(), sizeof(silence), &loaded);
+    if (result == ESP_OK && loaded != sizeof(silence))
+        result = ESP_ERR_INVALID_SIZE;
+    if (result == ESP_OK)
+        result = i2s_channel_enable(tx_handle_);
+    if (result == ESP_OK) {
+        running_ = true;
+        result = WriteSilence(100);
+    }
+    if (result == ESP_OK)
+        result = gpio_set_level(stubuddy::kAmplifierCtrl, stubuddy::kAmplifierRight);
+    if (result == ESP_OK)
+        result = WriteSilence(20);
+    if (result != ESP_OK) {
+        Fail(result, "enable output");
+        return;
+    }
+    AudioCodec::EnableOutput(true);
+    ESP_LOGI(kTag, "OUTPUT ON: CTRL=HIGH, RIGHT channel");
+}
+
+int StubuddyAudioCodec::Write(const int16_t* data, int samples) {
+    if (!output_enabled_ || !data || samples <= 0)
+        return 0;
+    const int volume = std::clamp(output_volume_, 0, 100);
+    StereoBlock block = {};
+    for (int offset = 0; offset < samples;) {
+        const unsigned frames = std::min<unsigned>(samples - offset, stubuddy::kFramesPerBlock);
+        for (unsigned i = 0; i < frames; ++i) {
+            // Multiplication is defined for negative PCM; signed shifts are not.
+            const int64_t value = int64_t(data[offset + i]) * 65536 * volume * volume / 10000;
+            block[2 * i] = 0;
+            block[2 * i + 1] = static_cast<int32_t>(value);
+        }
+        const esp_err_t result = WriteSlots(block.data(), frames);
+        if (result != ESP_OK) {
+            Fail(result, "write PCM");
+            return offset;
+        }
+        offset += frames;
+    }
+    return samples;
+}
+
+esp_err_t StubuddyAudioCodec::Shutdown() {
+    esp_err_t result = gpio_set_level(stubuddy::kAmplifierCtrl, stubuddy::kAmplifierOff);
+    output_enabled_ = false;
+    if (running_) {
+        vTaskDelay(pdMS_TO_TICKS(10));
+        const esp_err_t disabled = i2s_channel_disable(tx_handle_);
+        if (result == ESP_OK)
+            result = disabled;
+        if (disabled == ESP_OK)
+            running_ = false;
+    }
+    if (tx_handle_ && !running_) {
+        const esp_err_t deleted = i2s_del_channel(tx_handle_);
+        if (result == ESP_OK)
+            result = deleted;
+        if (deleted == ESP_OK)
+            tx_handle_ = nullptr;
+    }
+    return result;
+}
+
+void StubuddyAudioCodec::Fail(esp_err_t error, const char* operation) {
+    failed_ = true;
+    ESP_LOGE(kTag, "%s: %s; amplifier shutting down", operation, esp_err_to_name(error));
+    const esp_err_t result = Shutdown();
+    if (result != ESP_OK)
+        ESP_LOGE(kTag, "Cleanup failed: %s", esp_err_to_name(result));
+}

@@ -112,6 +112,10 @@ Example (from `lichuang-c3-dev`):
 - `target`: target chip, must match the real hardware (`esp32`, `esp32s3`, `esp32c3`, `esp32c6`, `esp32p4`, ...).
 - `name`: compatibility-sensitive firmware variant name reported by release builds; typically matches `type`.
 - `sdkconfig_append`: extra sdkconfig lines merged into the defaults.
+- `sdkconfig_defaults` (optional build field): a non-empty list of defaults-file paths relative
+  to the project root. When present, these replace `sdkconfig.defaults` for that variant;
+  the generated `sdkconfig_append` fragment is still added last. This is useful for isolated
+  hardware-validation profiles such as `stubuddy-s3-n16r8-startup`.
 
 Both `type` and `name` must contain only lowercase letters, digits, periods
 (`.`), and hyphens (`-`). Underscores, spaces, and uppercase letters are not

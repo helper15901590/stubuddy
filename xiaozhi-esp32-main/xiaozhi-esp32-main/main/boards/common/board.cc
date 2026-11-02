@@ -1,17 +1,20 @@
 #include "board.h"
+#ifndef CONFIG_XIAOZHI_HEADLESS_STARTUP
+#include <esp_ota_ops.h>
 #include "assets/lang_config.h"
 #include "display/display.h"
-#include "settings.h"
 #include "system_info.h"
+#endif
+#include "settings.h"
 
 #include <esp_chip_info.h>
 #include <esp_log.h>
-#include <esp_ota_ops.h>
 #include <esp_random.h>
 
 #define TAG "Board"
 
 Board::Board() {
+#ifndef CONFIG_XIAOZHI_HEADLESS_STARTUP
     Settings settings("board", true);
     uuid_ = settings.GetString("uuid");
     if (uuid_.empty()) {
@@ -19,6 +22,10 @@ Board::Board() {
         settings.SetString("uuid", uuid_);
     }
     ESP_LOGI(TAG, "UUID=%s SKU=%s", uuid_.c_str(), BOARD_NAME);
+#else
+    // The hardware validation profile must not modify existing device NVS.
+    ESP_LOGI(TAG, "SKU=%s; local headless startup validation", BOARD_NAME);
+#endif
 }
 
 std::string Board::GenerateUuid() {
@@ -47,8 +54,12 @@ bool Board::GetBatteryLevel(int& level, bool& charging, bool& discharging) { ret
 bool Board::GetTemperature(float& esp32temp) { return false; }
 
 Display* Board::GetDisplay() {
+#ifdef CONFIG_XIAOZHI_HEADLESS_STARTUP
+    return nullptr;
+#else
     static NoDisplay display;
     return &display;
+#endif
 }
 
 Camera* Board::GetCamera() { return nullptr; }
@@ -59,6 +70,9 @@ Led* Board::GetLed() {
 }
 
 std::string Board::GetSystemInfoJson() {
+#ifdef CONFIG_XIAOZHI_HEADLESS_STARTUP
+    return R"({"board":)" + GetBoardJson() + "}";
+#else
     /*
         {
             "version": 2,
@@ -170,4 +184,5 @@ std::string Board::GetSystemInfoJson() {
     // Close the JSON object
     json += R"(})";
     return json;
+#endif
 }

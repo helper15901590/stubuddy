@@ -1,3 +1,12 @@
+# The startup profile reuses Board and AudioCodec, with a narrow source and
+# dependency set. It is selected before IDF's early requirements expansion.
+idf_build_get_property(_headless_startup XIAOZHI_HEADLESS_STARTUP)
+if(_headless_startup)
+    set(BOARD_DIR "stubuddy-s3-n16r8")
+    include("${CMAKE_CURRENT_LIST_DIR}/boards/${BOARD_DIR}/startup.cmake")
+    return()
+endif()
+
 # Define source files
 set(SOURCES "audio/audio_codec.cc"
             "audio/audio_debugger.cc"
@@ -91,7 +100,10 @@ set(EMOTE_RESOLUTION "320_240")
 
 # Select the board source directory from Kconfig
 # Set default assets if the board uses partition table V2
-if(CONFIG_BOARD_TYPE_BREAD_COMPACT_WIFI)
+if(CONFIG_BOARD_TYPE_STUBUDDY_S3_N16R8)
+    set(BOARD_DIR "stubuddy-s3-n16r8")
+    message(FATAL_ERROR "Use scripts/build.py stubuddy-s3-n16r8 --name stubuddy-s3-n16r8-startup")
+elseif(CONFIG_BOARD_TYPE_BREAD_COMPACT_WIFI)
     set(BOARD_DIR "bread-compact-wifi")
     set(BUILTIN_TEXT_FONT font_noto_sans_basic_14_1)
     set(BUILTIN_ICON_FONT font_material_symbols_14_1)
