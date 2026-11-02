@@ -1,4 +1,5 @@
 """Read-only checks preventing a different board/profile from being flashed."""
+import argparse
 import json
 import struct
 import subprocess
@@ -8,13 +9,18 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def verify(build_dir: Path) -> None:
+def verify(build_dir: Path, variant: str = "startup") -> None:
     project = json.loads((build_dir / "project_description.json").read_text(encoding="utf-8"))
     config = json.loads((build_dir / "config/sdkconfig.json").read_text(encoding="utf-8"))
     assert project["target"] == "esp32s3", "Wrong chip target"
     for option in ("BOARD_TYPE_STUBUDDY_S3_N16R8", "XIAOZHI_HEADLESS_STARTUP", "SPIRAM",
                    "SPIRAM_MODE_OCT", "FLASH_NONE_ASSETS"):
         assert config.get(option) is True, f"Required config is missing: {option}"
+    assert bool(config.get("STUBUDDY_PTT_SELFTEST")) == (variant == "ptt"), "Wrong startup/PTT mode"
+    sources = {Path(source).name for source in project["build_component_info"]["main"]["sources"]}
+    expected = "ptt_main.cc" if variant == "ptt" else "startup_main.cc"
+    other = "startup_main.cc" if variant == "ptt" else "ptt_main.cc"
+    assert expected in sources and other not in sources, "Wrong validation entry point"
     excluded = [name for name in project["build_components"]
                 if name in {"bt", "esp_wifi", "esp_lcd", "lvgl"}
                 or any(token in name for token in ("camera", "esp_video", "lvgl", "fonts", "esp-sr"))]
@@ -39,7 +45,7 @@ def verify(build_dir: Path) -> None:
     assert "StubuddyAudioCodec" in symbols, "Board AudioCodec adapter is missing"
     size = (build_dir / "xiaozhi.bin").stat().st_size
     assert size < 0x100000, "Application exceeds the validation partition"
-    print("PASS: stubuddy-s3-n16r8 / startup profile / ESP32-S3 N16R8")
+    print(f"PASS: stubuddy-s3-n16r8-{variant} / ESP32-S3 N16R8")
     print("PASS: no display, camera, BLE, Wi-Fi or font components")
     print("PASS: NVS 0x9000+0x6000 preserved; application starts at 0x10000")
     print("PASS: one board factory, one app_main, real AudioCodec adapter")
@@ -47,9 +53,12 @@ def verify(build_dir: Path) -> None:
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--variant", choices=("startup", "ptt"), default="startup")
+    args = parser.parse_args()
     try:
-        verify(ROOT / "build")
+        verify(ROOT / "build", args.variant)
     except (AssertionError, OSError, KeyError, ValueError, subprocess.SubprocessError) as error:
         print(f"FAIL: {error}", file=sys.stderr)
-        print("Build the stubuddy-s3-n16r8-startup variant before flashing.", file=sys.stderr)
+        print(f"Build the stubuddy-s3-n16r8-{args.variant} variant before flashing.", file=sys.stderr)
         raise SystemExit(1)

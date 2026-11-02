@@ -13,7 +13,8 @@ idf_build_set_property(MINIMAL_BUILD ON)
 # Kconfig alone is not available in that pass. Other variants keep the full app.
 set(ENV{XIAOZHI_HEADLESS_STARTUP_PROFILE} "0")
 idf_build_set_property(XIAOZHI_HEADLESS_STARTUP OFF)
-if(BOARD_NAME STREQUAL "stubuddy-s3-n16r8-startup")
+if(BOARD_NAME STREQUAL "stubuddy-s3-n16r8-startup" OR
+   BOARD_NAME STREQUAL "stubuddy-s3-n16r8-ptt")
     idf_build_set_property(XIAOZHI_HEADLESS_STARTUP ON)
     set(ENV{XIAOZHI_HEADLESS_STARTUP_PROFILE} "1")
 endif()

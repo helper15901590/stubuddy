@@ -39,7 +39,7 @@ public:
     }
     NetworkInterface* GetNetwork() override { return nullptr; }
     void StartNetwork() override {
-        ESP_LOGW(kTag, "Network is unavailable in checkpoint 3.1 startup validation");
+        ESP_LOGW(kTag, "Network is unavailable in local audio validation");
     }
     const char* GetNetworkStateIcon() override { return ""; }
     void SetPowerSaveLevel(PowerSaveLevel) override {}

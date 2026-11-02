@@ -37,8 +37,9 @@ public:
     virtual void OutputData(std::vector<int16_t>& data);
     virtual bool InputData(std::vector<int16_t>& data);
     virtual void Start();
-    // Optional status for adapters that recover from output errors instead of aborting.
+    // Optional status for adapters that stop safely on I/O errors instead of aborting.
     virtual bool HasOutputError() const { return false; }
+    virtual bool HasInputError() const { return false; }
 
     inline bool duplex() const { return duplex_; }
     inline bool input_reference() const { return input_reference_; }

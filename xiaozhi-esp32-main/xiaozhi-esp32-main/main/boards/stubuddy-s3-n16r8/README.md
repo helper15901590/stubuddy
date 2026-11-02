@@ -3,6 +3,10 @@
 本板型位于小智主工程中，通过唯一的 `DECLARE_BOARD(StubuddyBoard)` 创建，复用原有 `Board`、`AudioCodec::OutputData()` 接口。
 本次只验收启动和一次本地提示音。独立诊断工程已验收的PTT、灯效、配网随后逐项迁移。
 
+3.1已由用户完成三次重新上电验收，提交为 `dac5504`。
+当前新增的3.2按键录放使用独立变体 `stubuddy-s3-n16r8-ptt`，见 [PTT-VALIDATION.md](PTT-VALIDATION.md)。
+本页保留3.1启动变体的操作说明；3.2仍保持LED熄灭，灯效迁移在3.3进行。
+
 | 身份 | 值 |
 | --- | --- |
 | 物理板型/后续OTA族 | `stubuddy-s3-n16r8` |

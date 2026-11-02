@@ -26,6 +26,17 @@ class StubuddyStartupTests(unittest.TestCase):
         self.assertEqual(build._resolve_board_config("stubuddy-s3-n16r8", "esp32s3", []),
                          "CONFIG_BOARD_TYPE_STUBUDDY_S3_N16R8")
 
+    def test_ptt_variant_is_unique_and_modes_do_not_leak_between_builds(self):
+        variants = build._collect_variants(idf_version=(6, 1, 0))
+        self.assertEqual(sum(v["name"] == "stubuddy-s3-n16r8-ptt" for v in variants), 1)
+        cfg = json.loads((BOARD / "config.json").read_text(encoding="utf-8"))
+        builds = {variant["name"]: variant for variant in cfg["builds"]}
+        startup = builds["stubuddy-s3-n16r8-startup"]
+        ptt = builds["stubuddy-s3-n16r8-ptt"]
+        self.assertIn("CONFIG_STUBUDDY_PTT_SELFTEST=n", startup["sdkconfig_append"])
+        self.assertIn("CONFIG_STUBUDDY_PTT_SELFTEST=y", ptt["sdkconfig_append"])
+        self.assertEqual(startup["sdkconfig_defaults"], ptt["sdkconfig_defaults"])
+
     def test_custom_defaults_do_not_load_the_display_project_defaults(self):
         before = Path.cwd()
         try:

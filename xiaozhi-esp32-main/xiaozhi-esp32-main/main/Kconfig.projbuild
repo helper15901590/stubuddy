@@ -4,7 +4,14 @@ config XIAOZHI_HEADLESS_STARTUP
     bool
     default y if BOARD_TYPE_STUBUDDY_S3_N16R8
     help
-        Local Board/AudioCodec startup validation without graphics or network services.
+        Local Board/AudioCodec validation without graphics or network services.
+
+config STUBUDDY_PTT_SELFTEST
+    bool "Enable stubuddy local PTT validation (checkpoint 3.2)"
+    depends on XIAOZHI_HEADLESS_STARTUP && BOARD_TYPE_STUBUDDY_S3_N16R8
+    default n
+    help
+        Hold-to-record and release-to-replay validation, with a sixty-second limit.
 
 config OTA_URL
     string "Default OTA URL"

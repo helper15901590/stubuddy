@@ -1,6 +1,7 @@
 #include "stubuddy_audio_codec.h"
 #include "config.h"
 
+#include <driver/i2s_pdm.h>
 #include <esp_log.h>
 #include <freertos/task.h>
 #include <algorithm>
@@ -18,7 +19,10 @@ StubuddyAudioCodec::StubuddyAudioCodec() {
     input_channels_ = output_channels_ = 1;
 }
 
-StubuddyAudioCodec::~StubuddyAudioCodec() { Shutdown(); }
+StubuddyAudioCodec::~StubuddyAudioCodec() {
+    ShutdownInput();
+    Shutdown();
+}
 
 esp_err_t StubuddyAudioCodec::Initialize() {
     i2s_chan_config_t channel = I2S_CHANNEL_DEFAULT_CONFIG(XIAOZHI_I2S_PORT(1), I2S_ROLE_MASTER);
@@ -53,9 +57,80 @@ void StubuddyAudioCodec::Start() {
 }
 
 void StubuddyAudioCodec::EnableInput(bool enable) {
-    if (enable)
-        ESP_LOGW(kTag, "Microphone capture is reserved for checkpoint 3.2");
+    if (!enable) {
+        const esp_err_t result = ShutdownInput();
+        if (result != ESP_OK)
+            Fail(result, "stop input");
+        else
+            ESP_LOGI(kTag, "INPUT OFF: I2S0 released");
+        return;
+    }
+    if (input_enabled_ || failed_)
+        return;
+    // This checkpoint deliberately uses sequential capture/playback.
+    if (output_enabled_ || running_) {
+        Fail(ESP_ERR_INVALID_STATE, "input requested during output");
+        return;
+    }
+    i2s_chan_config_t channel = I2S_CHANNEL_DEFAULT_CONFIG(XIAOZHI_I2S_PORT(0), I2S_ROLE_MASTER);
+    channel.dma_desc_num = 6;
+    channel.dma_frame_num = 256;
+    esp_err_t result = i2s_new_channel(&channel, nullptr, &rx_handle_);
+    if (result == ESP_OK) {
+        i2s_pdm_rx_config_t config = {};
+        config.clk_cfg = I2S_PDM_RX_CLK_DEFAULT_CONFIG(stubuddy::kSampleRate);
+        config.slot_cfg =
+            I2S_PDM_RX_SLOT_PCM_FMT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_MONO);
+        config.slot_cfg.slot_mask = I2S_PDM_SLOT_LEFT;
+        config.gpio_cfg.clk = stubuddy::kMicrophoneClock;
+        config.gpio_cfg.din = stubuddy::kMicrophoneData;
+        result = i2s_channel_init_pdm_rx_mode(rx_handle_, &config);
+    }
+    if (result == ESP_OK)
+        result = i2s_channel_enable(rx_handle_);
+    if (result != ESP_OK) {
+        Fail(result, "enable PDM input");
+        return;
+    }
+    input_running_ = true;
+    AudioCodec::EnableInput(true);
+    ESP_LOGI(kTag, "INPUT ON: I2S0 PDM CLK=3 DATA=42; 16000 Hz PCM16 mono, LEFT slot");
+}
+
+int StubuddyAudioCodec::Read(int16_t* data, int samples) {
+    if (!input_enabled_ || !data || samples <= 0 || failed_)
+        return 0;
+    // AudioCodec::InputData only returns a bool. Fill the entire requested block
+    // or fail; never report success with a partially initialized vector.
+    for (int offset = 0; offset < samples;) {
+        const size_t requested = std::min(samples - offset, 256) * sizeof(int16_t);
+        size_t received = 0;
+        const esp_err_t result =
+            i2s_channel_read(rx_handle_, data + offset, requested, &received, 1000);
+        if (result != ESP_OK || received == 0 || received > requested || received % 2 != 0) {
+            Fail(result != ESP_OK ? result : ESP_ERR_INVALID_SIZE, "read PDM input");
+            return 0;
+        }
+        offset += received / sizeof(int16_t);
+    }
+    return samples;
+}
+
+esp_err_t StubuddyAudioCodec::ShutdownInput() {
     input_enabled_ = false;
+    if (input_running_) {
+        const esp_err_t result = i2s_channel_disable(rx_handle_);
+        if (result != ESP_OK)
+            return result;
+        input_running_ = false;
+    }
+    if (rx_handle_) {
+        const esp_err_t result = i2s_del_channel(rx_handle_);
+        if (result != ESP_OK)
+            return result;
+        rx_handle_ = nullptr;
+    }
+    return ESP_OK;
 }
 
 esp_err_t StubuddyAudioCodec::WriteSlots(const int32_t* data, unsigned frames) {
@@ -102,6 +177,10 @@ void StubuddyAudioCodec::EnableOutput(bool enable) {
     }
     if (output_enabled_ || failed_)
         return;
+    if (rx_handle_ || input_running_) {
+        Fail(ESP_ERR_INVALID_STATE, "output requested before input shutdown");
+        return;
+    }
     Start();
     if (!tx_handle_ || failed_)
         return;
@@ -179,4 +258,7 @@ void StubuddyAudioCodec::Fail(esp_err_t error, const char* operation) {
     const esp_err_t result = Shutdown();
     if (result != ESP_OK)
         ESP_LOGE(kTag, "Cleanup failed: %s", esp_err_to_name(result));
+    const esp_err_t input_result = ShutdownInput();
+    if (input_result != ESP_OK)
+        ESP_LOGE(kTag, "Input cleanup failed: %s", esp_err_to_name(input_result));
 }
