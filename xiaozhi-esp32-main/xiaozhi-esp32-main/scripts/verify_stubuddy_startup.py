@@ -16,11 +16,16 @@ def verify(build_dir: Path, variant: str = "startup") -> None:
     for option in ("BOARD_TYPE_STUBUDDY_S3_N16R8", "XIAOZHI_HEADLESS_STARTUP", "SPIRAM",
                    "SPIRAM_MODE_OCT", "FLASH_NONE_ASSETS"):
         assert config.get(option) is True, f"Required config is missing: {option}"
-    assert bool(config.get("STUBUDDY_PTT_SELFTEST")) == (variant == "ptt"), "Wrong startup/PTT mode"
+    ptt = variant in ("ptt", "ptt-led")
+    led = variant == "ptt-led"
+    assert bool(config.get("STUBUDDY_PTT_SELFTEST")) == ptt, "Wrong startup/PTT mode"
+    assert bool(config.get("STUBUDDY_STATUS_LED")) == led, "Wrong LED mode"
     sources = {Path(source).name for source in project["build_component_info"]["main"]["sources"]}
-    expected = "ptt_main.cc" if variant == "ptt" else "startup_main.cc"
-    other = "startup_main.cc" if variant == "ptt" else "ptt_main.cc"
+    expected = "ptt_main.cc" if ptt else "startup_main.cc"
+    other = "startup_main.cc" if ptt else "ptt_main.cc"
     assert expected in sources and other not in sources, "Wrong validation entry point"
+    assert ("status_led.cc" in sources) == led, "Wrong LED driver source selection"
+    assert ("esp_driver_ledc" in project["build_components"]) == led, "Wrong LEDC dependency selection"
     excluded = [name for name in project["build_components"]
                 if name in {"bt", "esp_wifi", "esp_lcd", "lvgl"}
                 or any(token in name for token in ("camera", "esp_video", "lvgl", "fonts", "esp-sr"))]
@@ -54,7 +59,7 @@ def verify(build_dir: Path, variant: str = "startup") -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--variant", choices=("startup", "ptt"), default="startup")
+    parser.add_argument("--variant", choices=("startup", "ptt", "ptt-led"), default="startup")
     args = parser.parse_args()
     try:
         verify(ROOT / "build", args.variant)

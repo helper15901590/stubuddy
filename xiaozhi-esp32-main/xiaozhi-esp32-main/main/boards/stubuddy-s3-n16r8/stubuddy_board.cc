@@ -22,9 +22,16 @@ esp_err_t InitializeOutput(gpio_num_t pin, int initial_level) {
 class StubuddyBoard final : public Board {
 public:
     StubuddyBoard() {
-        // Configure these pins exactly once. The codec owns subsequent level changes.
+        // The codec owns GPIO10 level changes; LEDC owns GPIO18 in the LED variant.
         ready_ = InitializeOutput(stubuddy::kAmplifierCtrl, stubuddy::kAmplifierOff) == ESP_OK;
+#ifdef CONFIG_STUBUDDY_STATUS_LED
+        // Stage a safe HIGH output without gpio_config's pin reservation. LEDC
+        // claims GPIO18 once in Initialize(), avoiding a false ownership conflict.
+        const bool led_ready = gpio_set_level(stubuddy::kStatusLed, stubuddy::kLedOff) == ESP_OK &&
+                               gpio_output_enable(stubuddy::kStatusLed) == ESP_OK;
+#else
         const bool led_ready = InitializeOutput(stubuddy::kStatusLed, stubuddy::kLedOff) == ESP_OK;
+#endif
         ready_ = ready_ && led_ready;
         ESP_LOGI(kTag, "board=%s; variant=%s; amplifier OFF; LED OFF; ready=%s", BOARD_TYPE,
                  BOARD_NAME, ready_ ? "yes" : "no");

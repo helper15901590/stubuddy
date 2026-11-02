@@ -14,8 +14,10 @@ idf_build_set_property(MINIMAL_BUILD ON)
 set(ENV{XIAOZHI_HEADLESS_STARTUP_PROFILE} "0")
 idf_build_set_property(XIAOZHI_HEADLESS_STARTUP OFF)
 if(BOARD_NAME STREQUAL "stubuddy-s3-n16r8-startup" OR
-   BOARD_NAME STREQUAL "stubuddy-s3-n16r8-ptt")
+   BOARD_NAME STREQUAL "stubuddy-s3-n16r8-ptt" OR
+   BOARD_NAME STREQUAL "stubuddy-s3-n16r8-ptt-led")
     idf_build_set_property(XIAOZHI_HEADLESS_STARTUP ON)
+    idf_build_set_property(STUBUDDY_VALIDATION_VARIANT "${BOARD_NAME}")
     set(ENV{XIAOZHI_HEADLESS_STARTUP_PROFILE} "1")
 endif()
 

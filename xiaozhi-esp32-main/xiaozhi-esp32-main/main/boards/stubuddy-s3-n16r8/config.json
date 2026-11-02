@@ -8,6 +8,7 @@
             "sdkconfig_append": [
                 "CONFIG_XIAOZHI_HEADLESS_STARTUP=y",
                 "CONFIG_STUBUDDY_PTT_SELFTEST=n",
+                "CONFIG_STUBUDDY_STATUS_LED=n",
                 "CONFIG_FLASH_NONE_ASSETS=y"
             ]
         },
@@ -17,6 +18,17 @@
             "sdkconfig_append": [
                 "CONFIG_XIAOZHI_HEADLESS_STARTUP=y",
                 "CONFIG_STUBUDDY_PTT_SELFTEST=y",
+                "CONFIG_STUBUDDY_STATUS_LED=n",
+                "CONFIG_FLASH_NONE_ASSETS=y"
+            ]
+        },
+        {
+            "name": "stubuddy-s3-n16r8-ptt-led",
+            "sdkconfig_defaults": ["main/boards/stubuddy-s3-n16r8/startup.defaults"],
+            "sdkconfig_append": [
+                "CONFIG_XIAOZHI_HEADLESS_STARTUP=y",
+                "CONFIG_STUBUDDY_PTT_SELFTEST=y",
+                "CONFIG_STUBUDDY_STATUS_LED=y",
                 "CONFIG_FLASH_NONE_ASSETS=y"
             ]
         }

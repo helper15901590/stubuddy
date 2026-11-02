@@ -37,6 +37,17 @@ class StubuddyStartupTests(unittest.TestCase):
         self.assertIn("CONFIG_STUBUDDY_PTT_SELFTEST=y", ptt["sdkconfig_append"])
         self.assertEqual(startup["sdkconfig_defaults"], ptt["sdkconfig_defaults"])
 
+    def test_led_variant_is_unique_and_older_modes_remain_dark(self):
+        variants = build._collect_variants(idf_version=(6, 1, 0))
+        self.assertEqual(sum(v["name"] == "stubuddy-s3-n16r8-ptt-led" for v in variants), 1)
+        cfg = json.loads((BOARD / "config.json").read_text(encoding="utf-8"))
+        for variant in cfg["builds"]:
+            led = variant["name"] == "stubuddy-s3-n16r8-ptt-led"
+            self.assertIn(f"CONFIG_STUBUDDY_STATUS_LED={'y' if led else 'n'}",
+                          variant["sdkconfig_append"])
+            if led:
+                self.assertIn("CONFIG_STUBUDDY_PTT_SELFTEST=y", variant["sdkconfig_append"])
+
     def test_custom_defaults_do_not_load_the_display_project_defaults(self):
         before = Path.cwd()
         try:

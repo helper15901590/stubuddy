@@ -13,6 +13,14 @@ config STUBUDDY_PTT_SELFTEST
     help
         Hold-to-record and release-to-replay validation, with a sixty-second limit.
 
+config STUBUDDY_STATUS_LED
+    bool "Enable stubuddy status LED validation (checkpoint 3.3)"
+    depends on STUBUDDY_PTT_SELFTEST
+    default n
+    help
+        Active-low GPIO18 LED. Idle and release gates are dark, capture/playback
+        are steady, waits breathe and errors flash. Enabled by the ptt-led variant.
+
 config OTA_URL
     string "Default OTA URL"
     default "https://api.tenclass.net/xiaozhi/ota/"

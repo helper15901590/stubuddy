@@ -4,6 +4,9 @@
 在小智主工程的 Board / AudioCodec 接口中迁移已验证的本地PTT流程。
 启动变体 `stubuddy-s3-n16r8-startup` 继续保留。
 
+3.2已由用户完成全部按键流程和连续十轮真机验收，结束无杂音，提交为 `e6e553c`。
+本页保留3.2无灯效变体说明；当前3.3灯效验收见 [LED-VALIDATION.md](LED-VALIDATION.md)。
+
 ## 本次功能流程
 
 ```text

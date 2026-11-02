@@ -21,7 +21,7 @@ constexpr float kPi = 3.14159265358979323846f;
 
 // The board factory must be constructed before checks, so failure paths also
 // leave the amplifier and LED off. Core code uses only Board/AudioCodec APIs.
-bool PlayStartupPrompt(Board& board) {
+bool PlayStartupPrompt(Board& board, PlaybackIndicator indicator) {
     uint32_t flash_size = 0;
     const esp_err_t flash_result = esp_flash_get_size(nullptr, &flash_size);
     const size_t psram_size = esp_psram_is_initialized() ? esp_psram_get_size() : 0;
@@ -55,6 +55,8 @@ bool PlayStartupPrompt(Board& board) {
     std::vector<int16_t> block(kBlockSamples);
     const unsigned total = rate * kToneMs / 1000;
     const unsigned fade = rate * kFadeMs / 1000;
+    if (indicator)
+        indicator(true);
     ESP_LOGI(kTag, "TONE START 1/1: 660 Hz; mono PCM -> AudioCodec -> RIGHT I2S slot");
     for (unsigned offset = 0; offset < total;) {
         const unsigned count = std::min(total - offset, kBlockSamples);
@@ -69,12 +71,16 @@ bool PlayStartupPrompt(Board& board) {
         codec->OutputData(block);
         if (!codec->output_enabled()) {
             codec->EnableOutput(false);
+            if (indicator)
+                indicator(false);
             ESP_LOGE(kTag, "AudioCodec write failed; test stopped");
             return false;
         }
         offset += count;
     }
     codec->EnableOutput(false);
+    if (indicator)
+        indicator(false);
     if (codec->HasOutputError())
         return false;
     ESP_LOGI(kTag, "TONE FINISHED: audibility and quiet shutdown require hardware verification");

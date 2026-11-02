@@ -7,6 +7,9 @@
 当前新增的3.2按键录放使用独立变体 `stubuddy-s3-n16r8-ptt`，见 [PTT-VALIDATION.md](PTT-VALIDATION.md)。
 本页保留3.1启动变体的操作说明；3.2仍保持LED熄灭，灯效迁移在3.3进行。
 
+3.2已由用户验收并提交 `e6e553c`。当前3.3新增 `stubuddy-s3-n16r8-ptt-led`，
+见 [LED-VALIDATION.md](LED-VALIDATION.md)：回放结束后无论按键是否仍按住，一律熄灯；仍需先松键再重新按下才能录音。
+
 | 身份 | 值 |
 | --- | --- |
 | 物理板型/后续OTA族 | `stubuddy-s3-n16r8` |
