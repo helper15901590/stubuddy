@@ -16,18 +16,23 @@ def verify(build_dir: Path, variant: str = "startup") -> None:
     for option in ("BOARD_TYPE_STUBUDDY_S3_N16R8", "XIAOZHI_HEADLESS_STARTUP", "SPIRAM",
                    "SPIRAM_MODE_OCT", "FLASH_NONE_ASSETS"):
         assert config.get(option) is True, f"Required config is missing: {option}"
-    ptt = variant in ("ptt", "ptt-led")
-    led = variant == "ptt-led"
+    wifi = variant == "wifi-ptt"
+    ptt = variant in ("ptt", "ptt-led", "wifi-ptt")
+    led = variant in ("ptt-led", "wifi-ptt")
     assert bool(config.get("STUBUDDY_PTT_SELFTEST")) == ptt, "Wrong startup/PTT mode"
     assert bool(config.get("STUBUDDY_STATUS_LED")) == led, "Wrong LED mode"
+    assert bool(config.get("STUBUDDY_SOFTAP_SETUP")) == wifi, "Wrong Wi-Fi setup mode"
+    assert not config.get("BT_ENABLED"), "Bluetooth must remain disabled"
     sources = {Path(source).name for source in project["build_component_info"]["main"]["sources"]}
     expected = "ptt_main.cc" if ptt else "startup_main.cc"
     other = "startup_main.cc" if ptt else "ptt_main.cc"
     assert expected in sources and other not in sources, "Wrong validation entry point"
     assert ("status_led.cc" in sources) == led, "Wrong LED driver source selection"
     assert ("esp_driver_ledc" in project["build_components"]) == led, "Wrong LEDC dependency selection"
+    assert ("wifi_setup.cc" in sources) == wifi, "Wrong provisioning source selection"
+    assert ("esp_wifi" in project["build_components"]) == wifi, "Wrong Wi-Fi dependency selection"
     excluded = [name for name in project["build_components"]
-                if name in {"bt", "esp_wifi", "esp_lcd", "lvgl"}
+                if name in {"bt", "esp_lcd", "lvgl"}
                 or any(token in name for token in ("camera", "esp_video", "lvgl", "fonts", "esp-sr"))]
     assert not excluded, f"Unexpected component dependencies: {excluded}"
 
@@ -51,7 +56,8 @@ def verify(build_dir: Path, variant: str = "startup") -> None:
     size = (build_dir / "xiaozhi.bin").stat().st_size
     assert size < 0x100000, "Application exceeds the validation partition"
     print(f"PASS: stubuddy-s3-n16r8-{variant} / ESP32-S3 N16R8")
-    print("PASS: no display, camera, BLE, Wi-Fi or font components")
+    print("PASS: no display, camera, BLE or font components")
+    print(f"PASS: Wi-Fi {'enabled with SoftAP provisioning' if wifi else 'excluded'}")
     print("PASS: NVS 0x9000+0x6000 preserved; application starts at 0x10000")
     print("PASS: one board factory, one app_main, real AudioCodec adapter")
     print(f"PASS: xiaozhi.bin = {size} bytes; hardware audibility remains to be checked")
@@ -59,7 +65,7 @@ def verify(build_dir: Path, variant: str = "startup") -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--variant", choices=("startup", "ptt", "ptt-led"), default="startup")
+    parser.add_argument("--variant", choices=("startup", "ptt", "ptt-led", "wifi-ptt"), default="startup")
     args = parser.parse_args()
     try:
         verify(ROOT / "build", args.variant)

@@ -1,4 +1,5 @@
 #include "ptt_button.h"
+#include "ptt_playback.h"
 #include "recording_pcm.h"
 
 #include <cassert>
@@ -61,6 +62,44 @@ constexpr bool CheckButton() {
     return !button.pressed();
 }
 static_assert(CheckButton(), "debounce/release-gate regression");
+
+constexpr bool CheckPlaybackInterrupt() {
+    stubuddy::PttButton button;
+    button.RequireRelease(true, 0);  // the old key is still held at the 60-second limit
+    stubuddy::PlaybackInterrupt interrupt(button.pressed());
+    for (unsigned now = 0; now < 1000; now += 10) {
+        button.Update(true, now);
+        if (interrupt.Update(button.pressed()))
+            return false;
+    }
+    button.Update(false, 1000);
+    button.Update(false, 1029);
+    if (interrupt.Update(button.pressed()))
+        return false;
+    button.Update(false, 1030);
+    if (interrupt.Update(button.pressed()))
+        return false;
+    button.Update(true, 1100);
+    button.Update(false, 1110);  // contact bounce must not stop playback
+    button.Update(true, 1120);
+    button.Update(true, 1149);
+    if (interrupt.Update(button.pressed()))
+        return false;
+    button.Update(true, 1150);
+    if (!interrupt.Update(button.pressed()) || interrupt.Update(true))
+        return false;
+    // After abort, the same held press continues recording without a release gate.
+    button.Update(true, 2000);
+    if (!button.pressed())
+        return false;
+    button.Update(false, 2010);
+    button.Update(false, 2040);
+    if (button.pressed())
+        return false;
+    stubuddy::PlaybackInterrupt normal(false);
+    return normal.Update(true) && !normal.Update(true);
+}
+static_assert(CheckPlaybackInterrupt(), "fresh-press interruption/released-key handoff regression");
 
 int main() {
     const auto empty = stubuddy::AnalyzeRecording(nullptr, 0);

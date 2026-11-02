@@ -33,6 +33,9 @@ public:
     virtual void SetInputGain(float gain);
     virtual void EnableInput(bool enable);
     virtual void EnableOutput(bool enable);
+    // Optional fast cancellation. Adapters may discard queued output instead
+    // of draining it; other boards retain their existing stop behavior.
+    virtual void AbortOutput() { EnableOutput(false); }
 
     virtual void OutputData(std::vector<int16_t>& data);
     virtual bool InputData(std::vector<int16_t>& data);

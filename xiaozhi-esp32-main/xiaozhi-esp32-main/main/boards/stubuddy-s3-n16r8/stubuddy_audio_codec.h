@@ -10,6 +10,7 @@ public:
     ~StubuddyAudioCodec() override;
     void Start() override;
     void EnableOutput(bool enable) override;
+    void AbortOutput() override;
     void EnableInput(bool enable) override;
     bool HasOutputError() const override { return failed_; }
     bool HasInputError() const override { return failed_; }

@@ -1,0 +1,249 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="setup-token" content="__CSRF_TOKEN__">
+<title>思巴迪 · 连接 Wi-Fi</title>
+<style>
+:root{color-scheme:light;font-family:system-ui,-apple-system,"Segoe UI",sans-serif;color:#202020;background:#fff}
+*{box-sizing:border-box}body{margin:0;padding:26px 20px 36px}.wrap{max-width:420px;margin:auto}
+.brand{font-size:15px;font-weight:650}.brand span{margin-left:8px;font-size:12px;font-weight:400;color:#777}
+h1{font-size:26px;font-weight:650;margin:24px 0 6px}p{font-size:13px;line-height:1.7;color:#777;margin:0}
+.section{margin-top:28px}.section-head{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:4px}h2{font-size:15px;font-weight:650;margin:0}
+.saved-section{padding:14px;border:1px solid #e8e8e8;border-radius:10px;background:#fafafa}.nearby-section{padding-top:4px}
+button,input{font:inherit}button{cursor:pointer}button:disabled{opacity:.45;cursor:default}button:focus-visible,input:focus-visible{outline:2px solid #666;outline-offset:3px}
+.text-button{border:0;background:#fff;padding:8px 0;color:#666;font-size:13px}.network-list{border-top:1px solid #eee;margin-top:8px}
+.network-row{border-bottom:1px solid #eee}.network-button{display:flex;align-items:center;justify-content:space-between;gap:14px;width:100%;min-height:54px;padding:14px 0;border:0;background:#fff;color:#222;text-align:left}
+.network-button[aria-expanded=true]{font-weight:650}.network-button[aria-pressed=true]{background:#ededed;box-shadow:inset 3px 0 #333;border-radius:7px;padding-left:12px;padding-right:12px;font-weight:650}
+.saved-section .network-button:not([aria-pressed=true]){background:transparent}.network-name{font-size:15px;min-width:0;overflow-wrap:anywhere;flex:1}.selection-mark{font-size:15px;color:#333}.empty{padding:16px 0;color:#888;font-size:13px}
+.manual{margin-top:18px;padding:10px 0;color:#555;font-size:13px;border:0;background:#fff;text-decoration:underline;text-underline-offset:4px}
+.editor{padding:16px;background:#f8f8f8;border-radius:8px;margin:0 0 14px}.editor-head{display:flex;align-items:center;justify-content:space-between;gap:12px}h3{font-size:14px;line-height:1.5;margin:0;overflow-wrap:anywhere}
+label{display:block;font-size:13px;margin:15px 0 7px}input[type=text],input[type=password]{width:100%;background:#fff;border:1px solid #ddd;border-radius:7px;padding:12px;font-size:16px;color:#222}
+.row{display:flex;gap:7px;align-items:center;margin-top:12px}.row label{margin:0;font-size:12px;color:#666}.primary{width:100%;padding:13px;border:0;border-radius:7px;background:#222;color:#fff;font-size:14px;font-weight:600;margin-top:18px}
+.status{font-size:13px;color:#666;line-height:1.7;margin-top:14px;white-space:pre-wrap;overflow-wrap:anywhere}.status.error{color:#b3261e}.status.done{color:#222}.foot{font-size:12px;color:#999;margin-top:24px}[hidden]{display:none!important}
+.progress{margin-top:18px}.progress-track{height:4px;border-radius:4px;background:#eee;overflow:hidden}.progress-track span{display:block;width:32%;height:100%;border-radius:4px;background:#555;animation:waiting 1.3s ease-in-out infinite}.progress p{margin-top:8px;font-size:12px}@keyframes waiting{from{transform:translateX(-110%)}to{transform:translateX(330%)}}@media(prefers-reduced-motion:reduce){.progress-track span{animation:none;width:100%;opacity:.5}}
+</style>
+</head>
+<body><main class="wrap">
+<div class="brand">stubuddy <span>思巴迪</span></div>
+<h1>连接 Wi-Fi</h1>
+<p>2.4GHz</p>
+<div id="status" class="status" role="status" aria-live="polite" hidden></div>
+<div id="progress" class="progress" role="status" aria-live="polite" hidden><div class="progress-track" aria-hidden="true"><span></span></div><p id="progress-text"></p></div>
+<section class="section saved-section" aria-labelledby="saved-title">
+<div class="section-head"><h2 id="saved-title">连接过的网络</h2></div>
+<div id="saved" class="network-list"><p class="empty">正在读取…</p></div>
+</section>
+<section class="section nearby-section" aria-labelledby="nearby-title">
+<div class="section-head"><h2 id="nearby-title">附近的 Wi-Fi</h2><button id="scan" class="text-button" type="button">刷新</button></div>
+<div id="networks" class="network-list"><p class="empty">正在查找网络…</p></div>
+</section>
+<button id="manual" class="manual" type="button">手动添加网络</button>
+<div id="editor-host">
+<section id="editor" class="editor" aria-labelledby="edit-title" hidden>
+<div class="editor-head"><h3 id="edit-title">连接网络</h3><button id="close-editor" class="text-button" type="button">收起</button></div>
+<form id="form" novalidate>
+<div id="ssid-field"><label for="ssid">Wi-Fi 名称</label><input id="ssid" type="text" autocomplete="off" autocapitalize="none" spellcheck="false" enterkeyhint="next" placeholder="点击输入网络名称"></div>
+<label for="password">Wi-Fi 密码</label>
+<input id="password" type="password" autocomplete="off" autocapitalize="none" spellcheck="false" maxlength="63" enterkeyhint="done" placeholder="点击输入密码">
+<div class="row"><input id="show" type="checkbox"><label for="show">显示密码</label></div>
+<div class="row"><input id="open" type="checkbox"><label for="open">这个 Wi-Fi 没有密码</label></div>
+<button id="submit" class="primary" type="button">连接</button>
+</form>
+<p id="editor-status" class="status" hidden></p>
+</section>
+</div>
+<p class="foot">提示无法上网时，请保持连接。</p>
+</main>
+<script>
+'use strict';
+const token = document.querySelector('meta[name="setup-token"]').content;
+const el = id => document.getElementById(id);
+let submitting = false, connected = false, blocked = false, polling = false, scanning = false;
+let lastNetworks = '', lastSaved = '', savedNetworks = [], lastPhase = '', localError = '', pollTimer;
+let selectedSsid = '', editorKind = 'manual';
+const showStatus = (text, kind = '') => {
+  for (const id of ['status', 'editor-status']) { el(id).textContent = text; el(id).className = 'status ' + kind; el(id).hidden = !text; }
+};
+const showProgress = text => {
+  el('progress').hidden = !text;
+  el('progress').setAttribute('aria-busy', String(Boolean(text)));
+  el('progress-text').textContent = text;
+};
+const bytes = text => new TextEncoder().encode(text).length;
+const busy = () => submitting || connected || blocked;
+async function request(path, options = {}) {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 5000);
+  try {
+    const response = await fetch(path, {...options, signal: controller.signal, cache: 'no-store',
+      headers: {'X-Setup-Token': token, ...(options.headers || {})}});
+    const data = await response.json();
+    if (!response.ok) throw new Error(data.error || '请求失败，请重试');
+    return data;
+  } finally { clearTimeout(timeout); }
+}
+function rows(id) { return Array.from(el(id).children).filter(row => row.dataset.ssid !== undefined); }
+function placeEditor() {
+  let parent = el('editor-host');
+  if (editorKind !== 'manual' && !el('editor').hidden)
+    parent = rows(editorKind).find(row => row.dataset.ssid === selectedSsid) || parent;
+  if (el('editor').parentNode !== parent) parent.append(el('editor'));
+  for (const id of ['saved', 'networks']) for (const row of rows(id)) {
+    row.children[0].setAttribute('aria-expanded', String(parent === row && !el('editor').hidden));
+    const selected = editorKind === id && row.dataset.ssid === selectedSsid;
+    row.children[0].setAttribute('aria-pressed', String(selected));
+    row.children[0].children[1].hidden = !selected;
+  }
+}
+function resetList(id) {
+  if (el(id).contains(el('editor'))) el('editor-host').append(el('editor'));
+  el(id).replaceChildren();
+}
+function addEmpty(id, text) {
+  const p = document.createElement('p'); p.className = 'empty'; p.textContent = text; el(id).append(p);
+}
+function addNetwork(id, ssid, action) {
+  const row = document.createElement('div'); row.className = 'network-row'; row.dataset.ssid = ssid;
+  const button = document.createElement('button'); button.type = 'button'; button.className = 'network-button';
+  const name = document.createElement('span'); name.className = 'network-name'; name.textContent = ssid;
+  const mark = document.createElement('span'); mark.className = 'selection-mark'; mark.textContent = '✓'; mark.hidden = true; mark.setAttribute('aria-hidden', 'true');
+  button.append(name); button.append(mark);
+  button.addEventListener('click', event => { if (event.isTrusted) return action(); });
+  row.append(button); el(id).append(row);
+}
+function renderSaved(networks) {
+  savedNetworks = networks;
+  const signature = JSON.stringify(networks);
+  if (signature === lastSaved) return;
+  if (el('saved').contains(document.activeElement)) return;
+  lastSaved = signature; resetList('saved');
+  if (!networks.length) addEmpty('saved', '暂无记录');
+  for (const ssid of networks) addNetwork('saved', ssid, () => useSaved(ssid));
+}
+function renderNetworks(networks, isScanning = false) {
+  const signature = JSON.stringify([networks, savedNetworks, networks.length ? false : isScanning]);
+  if (signature === lastNetworks) return;
+  if (el('networks').contains(document.activeElement)) return;
+  lastNetworks = signature; resetList('networks');
+  if (!networks.length) addEmpty('networks', isScanning ? '扫描中…' : '未找到网络');
+  for (const network of networks) {
+    addNetwork('networks', network.ssid,
+      () => selectNetwork(network.ssid, network.secured, 'networks'));
+  }
+}
+function lockControls(locked) {
+  for (const id of ['submit', 'scan', 'manual', 'close-editor', 'ssid', 'open', 'show']) el(id).disabled = locked;
+  el('password').disabled = locked || el('open').checked;
+  for (const id of ['saved', 'networks']) for (const row of rows(id)) row.children[0].disabled = locked;
+}
+function selectNetwork(ssid, secured, kind) {
+  if (busy()) return;
+  localError = ''; selectedSsid = ssid; editorKind = kind;
+  el('ssid').value = ssid; el('password').value = '';
+  el('show').checked = false; el('password').type = 'password'; el('open').checked = !secured;
+  el('ssid-field').hidden = kind !== 'manual';
+  el('edit-title').textContent = kind === 'manual' ? '手动连接' : '连接 ' + ssid;
+  el('editor-status').textContent = '';
+  el('editor').hidden = false; placeEditor(); lockControls(false);
+  // Selection changes the page layout only. Never focus a text input here.
+  el('editor').scrollIntoView({block:'nearest', behavior:'smooth'});
+}
+async function useSaved(ssid) {
+  if (busy()) return;
+  // Reconnect must never open the new-network/password editor, even briefly
+  // or after failure. Keep only the selected-row highlight and status feedback.
+  selectedSsid = ssid; editorKind = 'saved';
+  el('password').blur(); el('password').value = ''; el('ssid').value = '';
+  el('editor').hidden = true; placeEditor();
+  await startConnection('/api/reconnect', {ssid});
+}
+function applyStatus(status) {
+  renderSaved(status.saved_networks || []);
+  renderNetworks(status.networks || [], status.scanning);
+  placeEditor();
+  connected = status.phase === 'connected';
+  blocked = Boolean(status.busy || connected || status.phase === 'error');
+  lockControls(busy());
+  el('scan').disabled = busy() || status.scanning || scanning;
+  el('scan').textContent = status.scanning || scanning ? '扫描中…' : '刷新';
+  if (connected) {
+    showProgress('');
+    localError = ''; showStatus(status.message, 'done');
+    el('password').value = '';
+    el('editor').hidden = true; placeEditor();
+  } else if (!submitting) {
+    if (status.phase === 'connecting') localError = '';
+    const failed = status.failed || status.phase === 'error' || (lastPhase === 'connecting' && status.phase === 'setup');
+    showStatus(localError || (failed || status.phase === 'connecting' ? status.message : ''), localError || failed ? 'error' : '');
+    showProgress(failed || localError ? '' : status.phase === 'connecting' || status.busy
+      ? '正在连接 Wi-Fi，请稍候…' : status.scanning || scanning ? '正在查找附近的 Wi-Fi…' : '');
+  }
+  lastPhase = status.phase;
+}
+function schedulePoll(delay = 1500) { clearTimeout(pollTimer); if (!connected) pollTimer = setTimeout(poll, delay); }
+async function poll() {
+  if (polling) return;
+  polling = true; clearTimeout(pollTimer);
+  try { applyStatus(await request('/api/status')); }
+  catch (error) {
+    if (!connected && !submitting) {
+      showStatus('暂时无法连接设备，请重连思巴迪热点后刷新此页。', 'error');
+      showProgress(blocked ? '正在等待设备响应…' : '');
+    }
+  } finally { polling = false; schedulePoll(); }
+}
+async function scan() {
+  if (busy() || scanning) return;
+  scanning = true; el('scan').disabled = true;
+  showProgress('正在查找附近的 Wi-Fi…');
+  try { applyStatus(await request('/api/scan')); }
+  catch (error) { localError = error.message; showStatus(localError, 'error'); showProgress(''); }
+  finally { scanning = false; schedulePoll(300); }
+}
+for (const id of ['ssid', 'password']) {
+  const field = el(id);
+  // Initially the whole editor is hidden. Once selected, ordinary editable
+  // inputs let the browser handle trusted taps and keyboard focus natively.
+  field.addEventListener('input', () => { localError = ''; });
+}
+window.addEventListener('pageshow', () => {
+  for (const id of ['ssid', 'password']) el(id).blur();
+});
+el('manual').addEventListener('click', () => selectNetwork('', true, 'manual'));
+el('close-editor').addEventListener('click', () => { if (busy()) return; el('password').value = ''; el('editor').hidden = true; placeEditor(); });
+el('show').addEventListener('change', () => { el('password').type = el('show').checked ? 'text' : 'password'; });
+el('open').addEventListener('change', () => { localError = ''; el('password').disabled = busy() || el('open').checked; });
+el('scan').addEventListener('click', scan);
+async function startConnection(path, body) {
+  if (busy()) return;
+  localError = ''; submitting = true; lockControls(true);
+  el('ssid').blur(); el('password').blur(); showStatus('正在连接，请稍候…');
+  showProgress('正在提交连接请求…');
+  try {
+    await request(path, {method:'POST', headers:{'Content-Type':'application/json',
+      'X-Setup-Action':path === '/api/reconnect' ? 'history-reconnect' : 'manual-connect'}, body:JSON.stringify(body)});
+    lastPhase = 'connecting'; blocked = true;
+  } catch (error) {
+    localError = error.name === 'AbortError' ? '提交超时，请重连设备热点后查看状态。' : error.message;
+    showStatus(localError, 'error');
+    showProgress('');
+  } finally { submitting = false; await poll(); }
+}
+// Native autofill/Return may submit forms. Only a deliberate button click may
+// change the device network; scanning and polling never invoke this action.
+el('form').addEventListener('submit', event => { event.preventDefault(); });
+el('submit').addEventListener('click', async event => {
+  if (!event.isTrusted || busy()) return; localError = '';
+  const ssid = el('ssid').value;
+  const password = el('open').checked ? '' : el('password').value;
+  if (!ssid || bytes(ssid) > 32) { localError = '请输入有效的 Wi-Fi 名称（最多32字节）。'; showStatus(localError, 'error'); return; }
+  if (!el('open').checked && (bytes(password) < 8 || bytes(password) > 63)) {
+    localError = '密码需要8至63字节；无密码网络请勾选“这个 Wi-Fi 没有密码”。'; showStatus(localError, 'error'); return;
+  }
+  await startConnection('/api/connect', {ssid, password});
+});
+scan();
+</script>
+</body></html>

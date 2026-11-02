@@ -19,6 +19,9 @@ public:
     esp_err_t Initialize();
     void SetState(LedState state);
     void SetNetworkState(NetworkLedState state);
+    // Wait for the timer's actual PWM update before allowing replay to relight
+    // the LED. minimum_off_ms is used only for the visible 60-second transition.
+    esp_err_t ShowCaptureStopped(unsigned minimum_off_ms);
     void SetPhase(PttLedPhase phase, bool key_pressed = false) {
         SetState(PttLedState(phase, key_pressed));
     }
@@ -34,6 +37,8 @@ private:
     NetworkLedState network_state_ = NetworkLedState::None;
     unsigned epoch_ms_ = 0;
     unsigned last_duty_ = 0;
+    unsigned generation_ = 0;
+    unsigned applied_generation_ = 0;
     bool output_error_logged_ = false;
 };
 }  // namespace stubuddy

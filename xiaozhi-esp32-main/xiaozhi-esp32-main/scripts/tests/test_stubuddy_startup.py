@@ -42,10 +42,22 @@ class StubuddyStartupTests(unittest.TestCase):
         self.assertEqual(sum(v["name"] == "stubuddy-s3-n16r8-ptt-led" for v in variants), 1)
         cfg = json.loads((BOARD / "config.json").read_text(encoding="utf-8"))
         for variant in cfg["builds"]:
-            led = variant["name"] == "stubuddy-s3-n16r8-ptt-led"
+            led = variant["name"] in ("stubuddy-s3-n16r8-ptt-led", "stubuddy-s3-n16r8-wifi-ptt")
             self.assertIn(f"CONFIG_STUBUDDY_STATUS_LED={'y' if led else 'n'}",
                           variant["sdkconfig_append"])
             if led:
+                self.assertIn("CONFIG_STUBUDDY_PTT_SELFTEST=y", variant["sdkconfig_append"])
+
+    def test_wifi_variant_preserves_offline_profiles_and_requires_led_ptt(self):
+        variants = build._collect_variants(idf_version=(6, 1, 0))
+        self.assertEqual(sum(v["name"] == "stubuddy-s3-n16r8-wifi-ptt" for v in variants), 1)
+        cfg = json.loads((BOARD / "config.json").read_text(encoding="utf-8"))
+        for variant in cfg["builds"]:
+            wifi = variant["name"] == "stubuddy-s3-n16r8-wifi-ptt"
+            self.assertIn(f"CONFIG_STUBUDDY_SOFTAP_SETUP={'y' if wifi else 'n'}",
+                          variant["sdkconfig_append"])
+            if wifi:
+                self.assertIn("CONFIG_STUBUDDY_STATUS_LED=y", variant["sdkconfig_append"])
                 self.assertIn("CONFIG_STUBUDDY_PTT_SELFTEST=y", variant["sdkconfig_append"])
 
     def test_custom_defaults_do_not_load_the_display_project_defaults(self):

@@ -17,7 +17,7 @@ constexpr bool HeldPlaybackCompletionStaysDark() {
     if (PttLedState(PttLedPhase::ArmedIdle, button.pressed()) != LedState::Recording)
         return false;
     if (PttLedState(PttLedPhase::Recording, true) != LedState::Recording ||
-        PttLedState(PttLedPhase::PreparingReplay, true) != LedState::Idle ||
+        PttLedState(PttLedPhase::PreparingReplay, true) != LedState::CaptureStopped ||
         PttLedState(PttLedPhase::Playback, true) != LedState::Playback)
         return false;
     // Timeout playback ends while still held: remain dark for any hold length.
@@ -47,12 +47,13 @@ constexpr bool HeldPlaybackCompletionStaysDark() {
 constexpr bool PatternsAndPriorityPass() {
     for (bool held : {false, true}) {
         if (PttLedState(PttLedPhase::ReleaseGate, held) != LedState::Idle ||
-            PttLedState(PttLedPhase::PreparingReplay, held) != LedState::Idle ||
+            PttLedState(PttLedPhase::PreparingReplay, held) != LedState::CaptureStopped ||
             PttLedState(PttLedPhase::Playback, held) != LedState::Playback)
             return false;
     }
     for (unsigned ms = 0; ms < 4000; ++ms) {
         if (LedBrightness(LedState::Idle, ms) != 0 ||
+            LedBrightness(LedState::CaptureStopped, ms) != 0 ||
             LedBrightness(LedState::Recording, ms) != kLedMaxDuty ||
             LedBrightness(LedState::Playback, ms) != kLedMaxDuty)
             return false;
@@ -75,8 +76,8 @@ constexpr bool PatternsAndPriorityPass() {
                 return false;
         }
     }
-    for (LedState local : {LedState::Idle, LedState::Recording, LedState::Playback,
-                           LedState::ModelWaiting, LedState::Error}) {
+    for (LedState local : {LedState::Idle, LedState::CaptureStopped, LedState::Recording,
+                           LedState::Playback, LedState::ModelWaiting, LedState::Error}) {
         if (EffectiveLedState(local, NetworkLedState::Fault) != LedState::Error ||
             EffectiveLedState(local, NetworkLedState::RetryError) != LedState::Error)
             return false;
@@ -84,6 +85,7 @@ constexpr bool PatternsAndPriorityPass() {
     for (NetworkLedState net :
          {NetworkLedState::None, NetworkLedState::Setup, NetworkLedState::Connecting}) {
         if (EffectiveLedState(LedState::Error, net) != LedState::Error ||
+            EffectiveLedState(LedState::CaptureStopped, net) != LedState::CaptureStopped ||
             EffectiveLedState(LedState::Recording, net) != LedState::Recording ||
             EffectiveLedState(LedState::Playback, net) != LedState::Playback)
             return false;

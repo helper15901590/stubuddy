@@ -3,11 +3,17 @@
 #include "config.h"
 #include "led_pattern.h"
 #include "ptt_button.h"
+#include "ptt_playback.h"
 #include "recording_pcm.h"
 #include "startup_audio.h"
 
 #ifdef CONFIG_STUBUDDY_STATUS_LED
 #include "status_led.h"
+#endif
+#ifdef CONFIG_STUBUDDY_SOFTAP_SETUP
+#include "network_audio.h"
+#include "wifi_audio_rules.h"
+#include "wifi_setup.h"
 #endif
 
 #include <esp_app_desc.h>
@@ -23,16 +29,23 @@
 
 namespace {
 constexpr char kTag[] = "STUBUDDY_PTT";
-#ifdef CONFIG_STUBUDDY_STATUS_LED
+#ifdef CONFIG_STUBUDDY_SOFTAP_SETUP
+constexpr char kCheckpoint[] = "3.4";
+stubuddy::WifiSetup wifi_setup;
+#elif defined(CONFIG_STUBUDDY_STATUS_LED)
 constexpr char kCheckpoint[] = "3.3";
+#else
+constexpr char kCheckpoint[] = "3.2";
+#endif
+#ifdef CONFIG_STUBUDDY_STATUS_LED
 constexpr char kLedMode[] = "stateful";
 stubuddy::StatusLed status_led;
 #else
-constexpr char kCheckpoint[] = "3.2";
 constexpr char kLedMode[] = "OFF";
 // Preserve the validated 3.2 variant, without linking the LEDC driver.
 struct NoStatusLed {
     esp_err_t Initialize() { return ESP_OK; }
+    esp_err_t ShowCaptureStopped(unsigned) { return ESP_OK; }
     void SetState(stubuddy::LedState) {}
     void SetPhase(stubuddy::PttLedPhase, bool = false) {}
 } status_led;
@@ -71,17 +84,91 @@ void IndicateStartupPlayback(bool playing) {
 }
 
 esp_err_t InitializeButton() {
+    static bool configured = false;
+    if (configured)
+        return ESP_OK;
     gpio_config_t config = {};
     config.pin_bit_mask = 1ULL << stubuddy::kMainButton;
     config.mode = GPIO_MODE_INPUT;
     config.pull_up_en = GPIO_PULLUP_ENABLE;
     config.pull_down_en = GPIO_PULLDOWN_DISABLE;
     config.intr_type = GPIO_INTR_DISABLE;
-    return gpio_config(&config);
+    const esp_err_t result = gpio_config(&config);
+    configured = result == ESP_OK;
+    return result;
 }
 
+#ifdef CONFIG_STUBUDDY_SOFTAP_SETUP
+esp_err_t CaptureBootSetupRequest(bool& force_setup) {
+    ESP_RETURN_ON_ERROR(InitializeButton(), kTag, "Boot key setup failed");
+    const bool initially_pressed = RawButtonPressed();
+    if (initially_pressed)
+        vTaskDelay(pdMS_TO_TICKS(stubuddy::PttButton::kDebounceMs));
+    force_setup = stubuddy::BootSetupRequested(initially_pressed, RawButtonPressed());
+    ESP_LOGI(kTag, "BOOT BUTTON: setup=%s; sampled before startup prompt; history retained",
+             force_setup ? "FORCED" : "NORMAL");
+    return ESP_OK;
+}
+
+esp_err_t AwaitNetworkReady(AudioCodec& codec) {
+    static bool first_ready = true;
+    bool waited = false;
+    bool handled_cue = false;
+    while (true) {
+        ESP_RETURN_ON_FALSE(!wifi_setup.failed(), ESP_FAIL, kTag, "WiFi controller fault");
+        if (!wifi_setup.online() && !waited) {
+            waited = true;
+            ESP_LOGI(kTag, "NETWORK WAIT: new recordings paused; microphone OFF");
+        }
+        // One audio owner plays notifications. Retain failures through a rapid
+        // retry; ordinary link updates still coalesce during long recordings.
+        const auto cue = wifi_setup.TakeCue();
+        if (cue != stubuddy::WifiCue::None) {
+            handled_cue = true;
+            ESP_RETURN_ON_ERROR(stubuddy::PlayWifiCue(codec, status_led, cue), kTag,
+                                "WiFi prompt failed");
+        }
+        if (wifi_setup.online() && !wifi_setup.has_cue()) {
+            if (first_ready || waited || handled_cue)
+                ESP_LOGI(kTag, "NETWORK READY: local PTT available after a fresh release gate");
+            first_ready = false;
+            return ESP_OK;
+        }
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+}
+#endif
+
+unsigned NetworkEpoch() {
+#ifdef CONFIG_STUBUDDY_SOFTAP_SETUP
+    return wifi_setup.link_epoch();
+#else
+    return 0;
+#endif
+}
+
+bool IdleSessionCurrent(unsigned epoch) {
+#ifdef CONFIG_STUBUDDY_SOFTAP_SETUP
+    const bool online = wifi_setup.online();
+    const unsigned current_epoch = wifi_setup.link_epoch();
+    return stubuddy::NetworkRecordingAllowed(online, epoch, current_epoch, wifi_setup.has_cue());
+#else
+    (void)epoch;
+    return true;
+#endif
+}
+
+enum class ReplayOutcome { Finished, Interrupted, CaptureStarted };
+
 esp_err_t Replay(AudioCodec& codec, const int16_t* recording, size_t count,
-                 std::vector<int16_t>& block, unsigned round) {
+                 std::vector<int16_t>& block, unsigned round, stubuddy::PttButton& button,
+                 ReplayOutcome& outcome) {
+    outcome = ReplayOutcome::Finished;
+#ifdef CONFIG_STUBUDDY_SOFTAP_SETUP
+    stubuddy::PlaybackInterrupt interrupt(button.pressed());
+#else
+    (void)button;
+#endif
     const auto levels = stubuddy::AnalyzeRecording(recording, count);
     ESP_LOGI(kTag, "CAPTURE: samples=%u, DC=%ld, peak=%ld, RMS=%.1f, clipped=%u, gain=%.2f",
              unsigned(count), long(levels.mean), long(levels.peak), levels.rms,
@@ -92,8 +179,42 @@ esp_err_t Replay(AudioCodec& codec, const int16_t* recording, size_t count,
     ESP_RETURN_ON_FALSE(codec.output_enabled() && !codec.HasOutputError(), ESP_FAIL, kTag,
                         "Cannot start replay output");
     status_led.SetPhase(stubuddy::PttLedPhase::Playback);
+#ifdef CONFIG_STUBUDDY_SOFTAP_SETUP
+    ESP_LOGI(kTag, "REPLAY START: round=%u; fresh press interrupts and starts held-key capture",
+             round);
+#else
     ESP_LOGI(kTag, "REPLAY START: round=%u; button presses ignored until next IDLE", round);
+#endif
     for (size_t offset = 0; offset < count;) {
+#ifdef CONFIG_STUBUDDY_SOFTAP_SETUP
+        button.Update(RawButtonPressed(), Milliseconds());
+        if (interrupt.Update(button.pressed())) {
+            const unsigned handoff_start = Milliseconds();
+            codec.AbortOutput();
+            status_led.SetPhase(stubuddy::PttLedPhase::ReleaseGate);
+            ESP_RETURN_ON_FALSE(!codec.HasOutputError(), ESP_FAIL, kTag, "Replay abort failed");
+            outcome = ReplayOutcome::Interrupted;
+            ESP_LOGI(kTag, "REPLAY INTERRUPTED: round=%u; old output/DMA discarded", round);
+            // A fresh user press outranks queued status sounds. Require a
+            // continuous online link, but leave those sounds queued until idle.
+            const unsigned new_epoch = NetworkEpoch();
+            const bool online = wifi_setup.online();
+            const unsigned current_epoch = NetworkEpoch();
+            if (stubuddy::NetworkRecordingAllowed(online, new_epoch, current_epoch, false)) {
+                codec.EnableInput(true);
+                ESP_RETURN_ON_FALSE(codec.input_enabled() && !codec.HasInputError(), ESP_FAIL, kTag,
+                                    "Cannot capture after replay interruption");
+                status_led.SetPhase(stubuddy::PttLedPhase::Recording);
+                outcome = ReplayOutcome::CaptureStarted;
+                ESP_LOGI(kTag,
+                         "INPUT HANDOFF: %u ms after abort; keep holding; release ends capture",
+                         Milliseconds() - handoff_start);
+            } else {
+                ESP_LOGI(kTag, "INPUT HANDOFF DEFERRED: network not ready; fresh release required");
+            }
+            return ESP_OK;
+        }
+#endif
         const size_t frames = std::min<size_t>(count - offset, stubuddy::kFramesPerBlock);
         block.resize(frames);
         for (size_t i = 0; i < frames; ++i)
@@ -127,33 +248,63 @@ esp_err_t RunPtt(AudioCodec& codec) {
     std::vector<int16_t> block(kPollSamples);
     stubuddy::PttButton button;
     unsigned round = 0;
+    bool continue_capture = false;
+    size_t dirty_samples = 0;
     while (true) {
-        // Keep release gates dark. Reading the raw held key here must never
-        // relight the LED or arm another recording after playback completion.
-        status_led.SetPhase(stubuddy::PttLedPhase::ReleaseGate);
-        block.resize(kPollSamples);
-        codec.EnableInput(true);
-        ESP_RETURN_ON_FALSE(codec.input_enabled() && !codec.HasInputError(), ESP_FAIL, kTag,
-                            "Cannot start PDM input");
-        // Warm up before arming the key, avoiding loss of the child's first word.
-        // Idle audio is drained and discarded, never stored in the PSRAM recording.
-        for (int i = 0; i < 20; ++i)
-            ESP_RETURN_ON_FALSE(codec.InputData(block), ESP_FAIL, kTag, "PDM warmup failed");
-        ESP_LOGI(kTag, "WAIT RELEASE: release GPIO15 before the next recording; LED OFF");
-        button.RequireRelease(RawButtonPressed(), Milliseconds());
-        while (button.pressed()) {
-            ESP_RETURN_ON_FALSE(codec.InputData(block), ESP_FAIL, kTag, "Release gate read failed");
-            button.Update(RawButtonPressed(), Milliseconds());
-        }
-        status_led.SetPhase(stubuddy::PttLedPhase::ArmedIdle);
-        ESP_LOGI(kTag, "IDLE: hold GPIO15 to record; release to replay (0.3-60 seconds); LED OFF");
-        while (!button.pressed()) {
-            ESP_RETURN_ON_FALSE(codec.InputData(block), ESP_FAIL, kTag, "Idle read failed");
-            button.Update(RawButtonPressed(), Milliseconds());
-            status_led.SetPhase(stubuddy::PttLedPhase::ArmedIdle, button.pressed());
+        if (!continue_capture) {
+            // Keep release gates dark. Reading the raw held key here must never
+            // relight the LED or arm another recording after playback completion.
+            status_led.SetPhase(stubuddy::PttLedPhase::ReleaseGate);
+#ifdef CONFIG_STUBUDDY_SOFTAP_SETUP
+            ESP_RETURN_ON_ERROR(AwaitNetworkReady(codec), kTag, "Network wait failed");
+#endif
+            const unsigned epoch = NetworkEpoch();
+            block.resize(kPollSamples);
+            codec.EnableInput(true);
+            ESP_RETURN_ON_FALSE(codec.input_enabled() && !codec.HasInputError(), ESP_FAIL, kTag,
+                                "Cannot start PDM input");
+            // Warm up before arming the key, avoiding loss of the child's first word.
+            // Idle audio is drained and discarded, never stored in the PSRAM recording.
+            for (int i = 0; i < 20 && IdleSessionCurrent(epoch); ++i)
+                ESP_RETURN_ON_FALSE(codec.InputData(block), ESP_FAIL, kTag, "PDM warmup failed");
+            ESP_LOGI(kTag, "WAIT RELEASE: release GPIO15 before the next recording; LED OFF");
+            button.RequireRelease(RawButtonPressed(), Milliseconds());
+            while (button.pressed() && IdleSessionCurrent(epoch)) {
+                ESP_RETURN_ON_FALSE(codec.InputData(block), ESP_FAIL, kTag,
+                                    "Release gate read failed");
+                button.Update(RawButtonPressed(), Milliseconds());
+            }
+            if (IdleSessionCurrent(epoch)) {
+                status_led.SetPhase(stubuddy::PttLedPhase::ArmedIdle);
+                ESP_LOGI(
+                    kTag,
+                    "IDLE: hold GPIO15 to record; release to replay (0.3-60 seconds); LED OFF");
+            }
+            while (!button.pressed() && IdleSessionCurrent(epoch)) {
+                ESP_RETURN_ON_FALSE(codec.InputData(block), ESP_FAIL, kTag, "Idle read failed");
+                button.Update(RawButtonPressed(), Milliseconds());
+                if (IdleSessionCurrent(epoch))
+                    status_led.SetPhase(stubuddy::PttLedPhase::ArmedIdle, button.pressed());
+            }
+
+            if (!IdleSessionCurrent(epoch)) {
+                codec.EnableInput(false);
+                status_led.SetPhase(stubuddy::PttLedPhase::ReleaseGate);
+                ESP_RETURN_ON_FALSE(!codec.HasInputError(), ESP_FAIL, kTag, "Cannot pause input");
+                ESP_LOGI(kTag,
+                         "NETWORK PAUSE: idle session revoked; release gate reset; microphone OFF");
+                continue;
+            }
+        } else {
+            // Replay already opened RX on the new press. Do not discard 200ms
+            // or wait for release here: that would lose the child's first word.
+            continue_capture = false;
+            block.resize(kPollSamples);
         }
 
         size_t count = 0;
+        // Admission is complete. From here through replay, link changes never
+        // cut the current round short; only the next idle session is gated.
         status_led.SetPhase(stubuddy::PttLedPhase::Recording);
         ESP_LOGI(kTag, "REC START: round=%u; amplifier OFF; LED=%s", ++round, kLedMode);
         while (count < kMaxSamples && button.pressed()) {
@@ -165,33 +316,53 @@ esp_err_t RunPtt(AudioCodec& codec) {
         }
         // Close RX before analyzing or enabling TX, including the 60-second case.
         codec.EnableInput(false);
-        status_led.SetPhase(stubuddy::PttLedPhase::PreparingReplay);
         ESP_RETURN_ON_FALSE(!codec.HasInputError(), ESP_FAIL, kTag, "Microphone shutdown failed");
         const bool limit = count == kMaxSamples;
+        dirty_samples = std::max(dirty_samples, count);
+        ESP_RETURN_ON_ERROR(status_led.ShowCaptureStopped(limit ? 150 : 0), kTag,
+                            "Capture-stop LED output acknowledgement failed");
         ESP_LOGI(kTag, "REC STOP: samples=%u, duration=%u ms, reason=%s; microphone OFF",
                  unsigned(count), unsigned(count * 1000 / stubuddy::kSampleRate),
                  limit ? "LIMIT" : "RELEASE");
         if (limit)
-            ESP_LOGI(kTag,
-                     "LIMIT: 60 seconds reached; automatic replay without waiting for release");
+            ESP_LOGI(kTag, "LIMIT: 60 seconds reached; LED OFF applied + 150ms; automatic replay");
+        ReplayOutcome outcome = ReplayOutcome::Finished;
         if (count < kMinSamples)
             ESP_LOGI(kTag, "DROP: recording shorter than 300 ms; no replay");
         else
-            ESP_RETURN_ON_ERROR(Replay(codec, recording.get(), count, block, round), kTag,
-                                "Replay failed");
-        std::memset(recording.get(), 0, count * sizeof(int16_t));
+            ESP_RETURN_ON_ERROR(
+                Replay(codec, recording.get(), count, block, round, button, outcome), kTag,
+                "Replay failed");
+        if (outcome == ReplayOutcome::CaptureStarted) {
+            // Reuse the same bounded buffer immediately. The next capture only
+            // plays its own count; clear the old tail when the chain finishes.
+            continue_capture = true;
+            ESP_LOGI(kTag,
+                     "ROUND INTERRUPTED: %u; microphone already ON; old replay will not resume",
+                     round);
+            continue;
+        }
+        std::memset(recording.get(), 0, dirty_samples * sizeof(int16_t));
+        dirty_samples = 0;
         std::fill(block.begin(), block.end(), 0);
         ESP_LOGI(kTag, "ROUND DONE: %u; internal_free=%u, PSRAM_free=%u; recording erased", round,
                  unsigned(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
                  unsigned(heap_caps_get_free_size(MALLOC_CAP_SPIRAM)));
-        // Never queue playback-time presses. Even a continuously held key must
-        // pass the next release gate before it can initiate a new recording.
+        // Normal completion still requires a fresh release. Only a verified
+        // playback interruption carries the new press directly into capture.
     }
 }
 }  // namespace
 
 extern "C" void app_main() {
     auto& board = Board::GetInstance();
+#ifdef CONFIG_STUBUDDY_SOFTAP_SETUP
+    bool force_setup = false;
+    if (CaptureBootSetupRequest(force_setup) != ESP_OK) {
+        ESP_LOGE(kTag, "FAILED: boot key setup; WiFi/PTT not started");
+        return;
+    }
+#endif
     ESP_LOGI(kTag, "CHECKPOINT %s; firmware=%s; board=%s; variant=%s", kCheckpoint,
              esp_app_get_description()->version, board.GetBoardType().c_str(), BOARD_NAME);
     if (status_led.Initialize() != ESP_OK) {
@@ -205,6 +376,13 @@ extern "C" void app_main() {
     }
     auto* codec = board.GetAudioCodec();
     if (codec) {
+#ifdef CONFIG_STUBUDDY_SOFTAP_SETUP
+        if (wifi_setup.Start(status_led, force_setup) != ESP_OK) {
+            status_led.SetState(stubuddy::LedState::Error);
+            ESP_LOGE(kTag, "FAILED: WiFi startup; original NVS retained");
+            return;
+        }
+#endif
         const esp_err_t result = RunPtt(*codec);
         status_led.SetState(stubuddy::LedState::Error);
         ESP_LOGE(kTag, "FAILED: %s; PTT stopped, reset required", esp_err_to_name(result));

@@ -5,17 +5,31 @@ idf_build_get_property(_variant STUBUDDY_VALIDATION_VARIANT)
 set(_entry "startup_main.cc")
 set(_ptt_variant OFF)
 set(_led_variant OFF)
+set(_wifi_variant OFF)
 set(_led_sources "")
 set(_led_requires "")
+set(_wifi_sources "")
+set(_wifi_requires "")
+set(_wifi_embed "")
 if(_variant STREQUAL "stubuddy-s3-n16r8-ptt" OR
-   _variant STREQUAL "stubuddy-s3-n16r8-ptt-led")
+   _variant STREQUAL "stubuddy-s3-n16r8-ptt-led" OR
+   _variant STREQUAL "stubuddy-s3-n16r8-wifi-ptt")
     set(_entry "ptt_main.cc")
     set(_ptt_variant ON)
 endif()
-if(_variant STREQUAL "stubuddy-s3-n16r8-ptt-led")
+if(_variant STREQUAL "stubuddy-s3-n16r8-ptt-led" OR
+   _variant STREQUAL "stubuddy-s3-n16r8-wifi-ptt")
     set(_led_variant ON)
     set(_led_sources "${COMPONENT_DIR}/boards/stubuddy-s3-n16r8/status_led.cc")
     set(_led_requires esp_driver_ledc)
+endif()
+if(_variant STREQUAL "stubuddy-s3-n16r8-wifi-ptt")
+    set(_wifi_variant ON)
+    set(_wifi_sources "${COMPONENT_DIR}/boards/stubuddy-s3-n16r8/wifi_setup.cc"
+                      "${COMPONENT_DIR}/boards/stubuddy-s3-n16r8/captive_dns.cc"
+                      "${COMPONENT_DIR}/boards/stubuddy-s3-n16r8/network_audio.cc")
+    set(_wifi_requires esp_wifi esp_netif esp_event esp_http_server lwip)
+    set(_wifi_embed "${COMPONENT_DIR}/boards/stubuddy-s3-n16r8/setup.html")
 endif()
 
 idf_component_register(
@@ -23,11 +37,12 @@ idf_component_register(
          "${COMPONENT_DIR}/boards/stubuddy-s3-n16r8/stubuddy_audio_codec.cc"
          "${COMPONENT_DIR}/boards/stubuddy-s3-n16r8/${_entry}"
          "${COMPONENT_DIR}/boards/stubuddy-s3-n16r8/startup_audio.cc"
-         ${_led_sources}
+         ${_led_sources} ${_wifi_sources}
          "${COMPONENT_DIR}/boards/common/board.cc" "${COMPONENT_DIR}/audio/audio_codec.cc" "${COMPONENT_DIR}/settings.cc"
     INCLUDE_DIRS "${COMPONENT_DIR}" "${COMPONENT_DIR}/boards/common" "${COMPONENT_DIR}/audio" "${COMPONENT_DIR}/boards/stubuddy-s3-n16r8"
     PRIV_REQUIRES esp_driver_gpio esp_driver_i2s esp_psram spi_flash esp_timer nvs_flash
-                  esp_app_format ${_led_requires}
+                  esp_app_format ${_led_requires} ${_wifi_requires}
+    EMBED_TXTFILES ${_wifi_embed}
     WHOLE_ARCHIVE
 )
 
@@ -45,7 +60,9 @@ if(NOT CMAKE_BUILD_EARLY_EXPANSION)
     if((_ptt_variant AND NOT CONFIG_STUBUDDY_PTT_SELFTEST) OR
        (NOT _ptt_variant AND CONFIG_STUBUDDY_PTT_SELFTEST) OR
        (_led_variant AND NOT CONFIG_STUBUDDY_STATUS_LED) OR
-       (NOT _led_variant AND CONFIG_STUBUDDY_STATUS_LED))
+       (NOT _led_variant AND CONFIG_STUBUDDY_STATUS_LED) OR
+       (_wifi_variant AND NOT CONFIG_STUBUDDY_SOFTAP_SETUP) OR
+       (NOT _wifi_variant AND CONFIG_STUBUDDY_SOFTAP_SETUP))
         message(FATAL_ERROR "stubuddy variant and PTT Kconfig disagree; use scripts/build.py")
     endif()
     target_compile_options(${COMPONENT_LIB} PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-std=gnu++23>)

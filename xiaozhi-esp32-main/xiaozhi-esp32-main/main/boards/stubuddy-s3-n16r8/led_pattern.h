@@ -2,7 +2,16 @@
 
 namespace stubuddy {
 
-enum class LedState { Idle, Recording, Playback, ModelWaiting, WifiSetup, WifiConnecting, Error };
+enum class LedState {
+    Idle,
+    CaptureStopped,
+    Recording,
+    Playback,
+    ModelWaiting,
+    WifiSetup,
+    WifiConnecting,
+    Error
+};
 enum class NetworkLedState { None, Setup, Connecting, RetryError, Fault };
 enum class PttLedPhase { ReleaseGate, ArmedIdle, Recording, PreparingReplay, Playback };
 
@@ -17,8 +26,9 @@ constexpr LedState PttLedState(PttLedPhase phase, bool key_pressed = false) {
         case PttLedPhase::ArmedIdle:
             return key_pressed ? LedState::Recording : LedState::Idle;
         case PttLedPhase::ReleaseGate:
-        case PttLedPhase::PreparingReplay:
             return LedState::Idle;
+        case PttLedPhase::PreparingReplay:
+            return LedState::CaptureStopped;
     }
     return LedState::Idle;
 }
@@ -27,7 +37,8 @@ constexpr LedState EffectiveLedState(LedState audio, NetworkLedState network) {
     if (audio == LedState::Error || network == NetworkLedState::RetryError ||
         network == NetworkLedState::Fault)
         return LedState::Error;
-    if (audio == LedState::Recording || audio == LedState::Playback)
+    if (audio == LedState::Recording || audio == LedState::Playback ||
+        audio == LedState::CaptureStopped)
         return audio;
     if (network == NetworkLedState::Setup)
         return LedState::WifiSetup;
@@ -42,6 +53,7 @@ inline constexpr unsigned kLedMaxDuty = 1023;
 constexpr unsigned LedBrightness(LedState state, unsigned elapsed_ms) {
     switch (state) {
         case LedState::Idle:
+        case LedState::CaptureStopped:
             return 0;
         case LedState::Recording:
         case LedState::Playback:
@@ -65,6 +77,8 @@ constexpr const char* LedStateName(LedState state) {
     switch (state) {
         case LedState::Idle:
             return "IDLE/OFF";
+        case LedState::CaptureStopped:
+            return "CAPTURE_STOPPED/OFF";
         case LedState::Recording:
             return "RECORDING/ON";
         case LedState::Playback:

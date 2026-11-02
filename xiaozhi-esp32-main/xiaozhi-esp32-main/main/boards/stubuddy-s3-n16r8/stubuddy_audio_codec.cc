@@ -208,6 +208,16 @@ void StubuddyAudioCodec::EnableOutput(bool enable) {
     ESP_LOGI(kTag, "OUTPUT ON: CTRL=HIGH, RIGHT channel");
 }
 
+void StubuddyAudioCodec::AbortOutput() {
+    // Mute first, then destroy TX/DMA. No trailing-silence drain: the old
+    // response must not keep playing while the child begins speaking.
+    const esp_err_t result = Shutdown();
+    if (result != ESP_OK)
+        Fail(result, "abort output");
+    else
+        ESP_LOGI(kTag, "OUTPUT ABORT: CTRL=LOW; I2S1/DMA discarded without drain");
+}
+
 int StubuddyAudioCodec::Write(const int16_t* data, int samples) {
     if (!output_enabled_ || !data || samples <= 0)
         return 0;

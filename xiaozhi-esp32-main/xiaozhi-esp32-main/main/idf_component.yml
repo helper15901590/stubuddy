@@ -2,6 +2,10 @@
 # The root CMakeLists sets this profile flag before dependency resolution.
 # It must not depend on late Kconfig values: full builds require fonts early.
 dependencies:
+  espressif/cjson:
+    version: ^1.7.19
+    matches:
+      - if: "$XIAOZHI_STUBUDDY_WIFI_PROFILE == 1"
   espressif/ip101:
     matches:
       - if: "$XIAOZHI_HEADLESS_STARTUP_PROFILE == 0"

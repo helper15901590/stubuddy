@@ -4,7 +4,8 @@ config XIAOZHI_HEADLESS_STARTUP
     bool
     default y if BOARD_TYPE_STUBUDDY_S3_N16R8
     help
-        Local Board/AudioCodec validation without graphics or network services.
+        Local Board/AudioCodec validation without graphics. The Wi-Fi variant
+        optionally enables SoftAP provisioning, without cloud services.
 
 config STUBUDDY_PTT_SELFTEST
     bool "Enable stubuddy local PTT validation (checkpoint 3.2)"
@@ -20,6 +21,14 @@ config STUBUDDY_STATUS_LED
     help
         Active-low GPIO18 LED. Idle and release gates are dark, capture/playback
         are steady, waits breathe and errors flash. Enabled by the ptt-led variant.
+
+config STUBUDDY_SOFTAP_SETUP
+    bool "Enable stubuddy SoftAP and network-gated PTT (checkpoint 3.4)"
+    depends on STUBUDDY_STATUS_LED
+    default n
+    help
+        Open-hotspot onboarding, saved Wi-Fi history and bounded reconnection.
+        Finish the current recording/replay on link loss, then wait for Wi-Fi.
 
 config OTA_URL
     string "Default OTA URL"

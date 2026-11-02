@@ -10,6 +10,12 @@
 3.2已由用户验收并提交 `e6e553c`。当前3.3新增 `stubuddy-s3-n16r8-ptt-led`，
 见 [LED-VALIDATION.md](LED-VALIDATION.md)：回放结束后无论按键是否仍按住，一律熄灯；仍需先松键再重新按下才能录音。
 
+3.3已验收并提交 `e8ec267`。当前3.4新增 `stubuddy-s3-n16r8-wifi-ptt`，见
+[WIFI-VALIDATION.md](WIFI-VALIDATION.md)：迁移已验收的SoftAP页面及历史记录，网络等待暂停新录音，已经开始的一轮录放完整结束。
+
+当前修订3.4.2补验按键打断接续收音，以及满60秒确认灭灯后自动回放，见
+[PTT-INTERRUPT-VALIDATION.md](PTT-INTERRUPT-VALIDATION.md)。正式AI端云取消及旧音频过滤在私有WS阶段验收。
+
 | 身份 | 值 |
 | --- | --- |
 | 物理板型/后续OTA族 | `stubuddy-s3-n16r8` |
