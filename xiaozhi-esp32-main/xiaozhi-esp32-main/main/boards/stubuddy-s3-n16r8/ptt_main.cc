@@ -6,6 +6,9 @@
 #include "ptt_playback.h"
 #include "recording_pcm.h"
 #include "startup_audio.h"
+#ifdef CONFIG_STUBUDDY_OPUS_LOOPBACK
+#include "opus_loopback.h"
+#endif
 
 #ifdef CONFIG_STUBUDDY_STATUS_LED
 #include "status_led.h"
@@ -30,8 +33,13 @@
 namespace {
 constexpr char kTag[] = "STUBUDDY_PTT";
 #ifdef CONFIG_STUBUDDY_SOFTAP_SETUP
-constexpr char kCheckpoint[] = "3.4";
 stubuddy::WifiSetup wifi_setup;
+#endif
+#ifdef CONFIG_STUBUDDY_OPUS_LOOPBACK
+constexpr char kCheckpoint[] = "3.5";
+stubuddy::OpusLoopback opus_loopback;
+#elif defined(CONFIG_STUBUDDY_SOFTAP_SETUP)
+constexpr char kCheckpoint[] = "3.4";
 #elif defined(CONFIG_STUBUDDY_STATUS_LED)
 constexpr char kCheckpoint[] = "3.3";
 #else
@@ -191,6 +199,10 @@ esp_err_t Replay(AudioCodec& codec, const int16_t* recording, size_t count,
         if (interrupt.Update(button.pressed())) {
             const unsigned handoff_start = Milliseconds();
             codec.AbortOutput();
+#ifdef CONFIG_STUBUDDY_OPUS_LOOPBACK
+            opus_loopback.Discard();
+            ESP_LOGI(kTag, "OPUS DISCARD: old packet stream invalidated; no old audio resumes");
+#endif
             status_led.SetPhase(stubuddy::PttLedPhase::ReleaseGate);
             ESP_RETURN_ON_FALSE(!codec.HasOutputError(), ESP_FAIL, kTag, "Replay abort failed");
             outcome = ReplayOutcome::Interrupted;
@@ -238,6 +250,9 @@ esp_err_t RunPtt(AudioCodec& codec) {
     ESP_RETURN_ON_FALSE(codec.input_sample_rate() == 16000 && codec.input_channels() == 1,
                         ESP_ERR_INVALID_STATE, kTag, "Unexpected capture format");
     ESP_RETURN_ON_ERROR(InitializeButton(), kTag, "GPIO15 input setup failed");
+#ifdef CONFIG_STUBUDDY_OPUS_LOOPBACK
+    ESP_RETURN_ON_ERROR(opus_loopback.Initialize(), kTag, "Opus loopback initialization failed");
+#endif
     std::unique_ptr<int16_t, RecordingDeleter> recording(static_cast<int16_t*>(
         heap_caps_malloc(kRecordingBytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)));
     ESP_RETURN_ON_FALSE(recording != nullptr, ESP_ERR_NO_MEM, kTag,
@@ -303,6 +318,9 @@ esp_err_t RunPtt(AudioCodec& codec) {
         }
 
         size_t count = 0;
+#ifdef CONFIG_STUBUDDY_OPUS_LOOPBACK
+        ESP_RETURN_ON_ERROR(opus_loopback.Begin(round + 1), kTag, "Opus round reset failed");
+#endif
         // Admission is complete. From here through replay, link changes never
         // cut the current round short; only the next idle session is gated.
         status_led.SetPhase(stubuddy::PttLedPhase::Recording);
@@ -312,6 +330,10 @@ esp_err_t RunPtt(AudioCodec& codec) {
             ESP_RETURN_ON_FALSE(codec.InputData(block), ESP_FAIL, kTag, "Recording read failed");
             std::memcpy(recording.get() + count, block.data(), block.size() * sizeof(int16_t));
             count += block.size();
+#ifdef CONFIG_STUBUDDY_OPUS_LOOPBACK
+            ESP_RETURN_ON_ERROR(opus_loopback.Append(block.data(), block.size()), kTag,
+                                "Opus capture encode failed");
+#endif
             button.Update(RawButtonPressed(), Milliseconds());
         }
         // Close RX before analyzing or enabling TX, including the 60-second case.
@@ -329,10 +351,15 @@ esp_err_t RunPtt(AudioCodec& codec) {
         ReplayOutcome outcome = ReplayOutcome::Finished;
         if (count < kMinSamples)
             ESP_LOGI(kTag, "DROP: recording shorter than 300 ms; no replay");
-        else
+        else {
+#ifdef CONFIG_STUBUDDY_OPUS_LOOPBACK
+            ESP_RETURN_ON_ERROR(opus_loopback.FinishAndDecode(recording.get(), count), kTag,
+                                "Opus decode failed; raw PCM is never replayed as a fallback");
+#endif
             ESP_RETURN_ON_ERROR(
                 Replay(codec, recording.get(), count, block, round, button, outcome), kTag,
                 "Replay failed");
+        }
         if (outcome == ReplayOutcome::CaptureStarted) {
             // Reuse the same bounded buffer immediately. The next capture only
             // plays its own count; clear the old tail when the chain finishes.
@@ -344,6 +371,9 @@ esp_err_t RunPtt(AudioCodec& codec) {
         }
         std::memset(recording.get(), 0, dirty_samples * sizeof(int16_t));
         dirty_samples = 0;
+#ifdef CONFIG_STUBUDDY_OPUS_LOOPBACK
+        opus_loopback.Erase();
+#endif
         std::fill(block.begin(), block.end(), 0);
         ESP_LOGI(kTag, "ROUND DONE: %u; internal_free=%u, PSRAM_free=%u; recording erased", round,
                  unsigned(heap_caps_get_free_size(MALLOC_CAP_INTERNAL)),
@@ -384,6 +414,11 @@ extern "C" void app_main() {
         }
 #endif
         const esp_err_t result = RunPtt(*codec);
+#ifdef CONFIG_STUBUDDY_OPUS_LOOPBACK
+        // RunPtt has stopped both I2S directions. Clear any partial encoded
+        // recording on the failure path as well as on normal round completion.
+        opus_loopback.Erase();
+#endif
         status_led.SetState(stubuddy::LedState::Error);
         ESP_LOGE(kTag, "FAILED: %s; PTT stopped, reset required", esp_err_to_name(result));
     }

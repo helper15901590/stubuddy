@@ -30,6 +30,14 @@ config STUBUDDY_SOFTAP_SETUP
         Open-hotspot onboarding, saved Wi-Fi history and bounded reconnection.
         Finish the current recording/replay on link loss, then wait for Wi-Fi.
 
+config STUBUDDY_OPUS_LOOPBACK
+    bool "Enable stubuddy local Opus loopback (checkpoint 3.5)"
+    depends on STUBUDDY_SOFTAP_SETUP
+    default n
+    help
+        Encode 16kHz mono PCM in 60ms frames while recording, then decode
+        locally for replay. No cloud connection. Use the wifi-opus-ptt variant.
+
 config OTA_URL
     string "Default OTA URL"
     default "https://api.tenclass.net/xiaozhi/ota/"

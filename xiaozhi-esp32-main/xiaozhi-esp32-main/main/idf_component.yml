@@ -82,6 +82,7 @@ dependencies:
     version: ~2.5.0
     matches:
       - if: "$XIAOZHI_HEADLESS_STARTUP_PROFILE == 0"
+      - if: "$XIAOZHI_STUBUDDY_OPUS_PROFILE == 1"
   78/esp-ml307:
     version: ~3.7.5
     matches:

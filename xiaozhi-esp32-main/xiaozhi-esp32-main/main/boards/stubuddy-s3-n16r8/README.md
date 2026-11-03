@@ -13,8 +13,13 @@
 3.3已验收并提交 `e8ec267`。当前3.4新增 `stubuddy-s3-n16r8-wifi-ptt`，见
 [WIFI-VALIDATION.md](WIFI-VALIDATION.md)：迁移已验收的SoftAP页面及历史记录，网络等待暂停新录音，已经开始的一轮录放完整结束。
 
-当前修订3.4.2补验按键打断接续收音，以及满60秒确认灭灯后自动回放，见
+3.4配网和3.4.2按键打断接续收音、满60秒灭灯交接已由用户验收并提交 `f5675ba`，见
 [PTT-INTERRUPT-VALIDATION.md](PTT-INTERRUPT-VALIDATION.md)。正式AI端云取消及旧音频过滤在私有WS阶段验收。
+
+当前3.5新增 `stubuddy-s3-n16r8-wifi-opus-ptt`：在设备内增量Opus编码/解码回放，
+启动执行不出声的编解码延迟自检；操作和真机验收见 [OPUS-VALIDATION.md](OPUS-VALIDATION.md)。
+3.5已于2026-11-03由用户完成真机验收：首尾清楚、采样数一致、errors=0，60秒自动回放、按键打断、配网与断网恢复及连续十轮正常，结束无杂音。
+此前四个验证变体继续保留，3.4回退变体仍为 `stubuddy-s3-n16r8-wifi-ptt`。
 
 | 身份 | 值 |
 | --- | --- |

@@ -42,7 +42,8 @@ class StubuddyStartupTests(unittest.TestCase):
         self.assertEqual(sum(v["name"] == "stubuddy-s3-n16r8-ptt-led" for v in variants), 1)
         cfg = json.loads((BOARD / "config.json").read_text(encoding="utf-8"))
         for variant in cfg["builds"]:
-            led = variant["name"] in ("stubuddy-s3-n16r8-ptt-led", "stubuddy-s3-n16r8-wifi-ptt")
+            led = variant["name"] in ("stubuddy-s3-n16r8-ptt-led", "stubuddy-s3-n16r8-wifi-ptt",
+                                      "stubuddy-s3-n16r8-wifi-opus-ptt")
             self.assertIn(f"CONFIG_STUBUDDY_STATUS_LED={'y' if led else 'n'}",
                           variant["sdkconfig_append"])
             if led:
@@ -53,12 +54,24 @@ class StubuddyStartupTests(unittest.TestCase):
         self.assertEqual(sum(v["name"] == "stubuddy-s3-n16r8-wifi-ptt" for v in variants), 1)
         cfg = json.loads((BOARD / "config.json").read_text(encoding="utf-8"))
         for variant in cfg["builds"]:
-            wifi = variant["name"] == "stubuddy-s3-n16r8-wifi-ptt"
+            wifi = variant["name"] in ("stubuddy-s3-n16r8-wifi-ptt",
+                                       "stubuddy-s3-n16r8-wifi-opus-ptt")
             self.assertIn(f"CONFIG_STUBUDDY_SOFTAP_SETUP={'y' if wifi else 'n'}",
                           variant["sdkconfig_append"])
             if wifi:
                 self.assertIn("CONFIG_STUBUDDY_STATUS_LED=y", variant["sdkconfig_append"])
                 self.assertIn("CONFIG_STUBUDDY_PTT_SELFTEST=y", variant["sdkconfig_append"])
+
+    def test_opus_variant_is_unique_and_keeps_the_pcm_fallback_independent(self):
+        variants = build._collect_variants(idf_version=(6, 1, 0))
+        self.assertEqual(sum(v["name"] == "stubuddy-s3-n16r8-wifi-opus-ptt" for v in variants), 1)
+        cfg = json.loads((BOARD / "config.json").read_text(encoding="utf-8"))
+        for variant in cfg["builds"]:
+            opus = variant["name"] == "stubuddy-s3-n16r8-wifi-opus-ptt"
+            self.assertIn(f"CONFIG_STUBUDDY_OPUS_LOOPBACK={'y' if opus else 'n'}",
+                          variant["sdkconfig_append"])
+            self.assertEqual("main/boards/stubuddy-s3-n16r8/opus.defaults" in
+                             variant["sdkconfig_defaults"], opus)
 
     def test_custom_defaults_do_not_load_the_display_project_defaults(self):
         before = Path.cwd()
@@ -90,13 +103,17 @@ class StubuddyStartupTests(unittest.TestCase):
             os.chdir(before)
 
     def test_partition_layout_preserves_accepted_nvs_and_factory_offsets(self):
-        entries = {}
-        for line in (BOARD / "startup-partitions.csv").read_text().splitlines():
-            if line.strip() and not line.startswith("#"):
-                fields = [item.strip() for item in line.split(",")]
-                entries[fields[0]] = (int(fields[3], 0), int(fields[4], 0))
-        self.assertEqual(entries["nvs"], (0x9000, 0x6000))
-        self.assertEqual(entries["factory"], (0x10000, 0x100000))
+        for filename, app_size in (("startup-partitions.csv", 0x100000),
+                                   ("opus-partitions.csv", 0x200000)):
+            with self.subTest(filename=filename):
+                entries = {}
+                for line in (BOARD / filename).read_text().splitlines():
+                    if line.strip() and not line.startswith("#"):
+                        fields = [item.strip() for item in line.split(",")]
+                        entries[fields[0]] = (int(fields[3], 0), int(fields[4], 0))
+                self.assertEqual(entries["nvs"], (0x9000, 0x6000))
+                self.assertEqual(entries["phy_init"], (0xF000, 0x1000))
+                self.assertEqual(entries["factory"], (0x10000, app_size))
 
 
 if __name__ == "__main__":

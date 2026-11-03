@@ -86,6 +86,13 @@ void StubuddyAudioCodec::EnableInput(bool enable) {
         config.gpio_cfg.din = stubuddy::kMicrophoneData;
         result = i2s_channel_init_pdm_rx_mode(rx_handle_, &config);
     }
+#ifdef CONFIG_STUBUDDY_OPUS_LOOPBACK
+    if (result == ESP_OK) {
+        i2s_event_callbacks_t callbacks = {};
+        callbacks.on_recv_q_ovf = OnReceiveOverflow;
+        result = i2s_channel_register_event_callback(rx_handle_, &callbacks, this);
+    }
+#endif
     if (result == ESP_OK)
         result = i2s_channel_enable(rx_handle_);
     if (result != ESP_OK) {
@@ -113,8 +120,22 @@ int StubuddyAudioCodec::Read(int16_t* data, int samples) {
         }
         offset += received / sizeof(int16_t);
     }
+#ifdef CONFIG_STUBUDDY_OPUS_LOOPBACK
+    if (rx_overflow_.load(std::memory_order_relaxed)) {
+        Fail(ESP_ERR_TIMEOUT, "PDM DMA queue overflow during Opus capture");
+        return 0;
+    }
+#endif
     return samples;
 }
+
+#ifdef CONFIG_STUBUDDY_OPUS_LOOPBACK
+bool IRAM_ATTR StubuddyAudioCodec::OnReceiveOverflow(i2s_chan_handle_t, i2s_event_data_t*,
+                                                     void* context) {
+    static_cast<StubuddyAudioCodec*>(context)->rx_overflow_.store(true, std::memory_order_relaxed);
+    return false;
+}
+#endif
 
 esp_err_t StubuddyAudioCodec::ShutdownInput() {
     input_enabled_ = false;
