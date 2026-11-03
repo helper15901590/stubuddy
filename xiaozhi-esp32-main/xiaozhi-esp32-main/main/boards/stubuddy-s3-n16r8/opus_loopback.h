@@ -21,6 +21,19 @@ public:
     esp_err_t FinishAndDecode(int16_t* pcm, size_t samples);
     void Discard();
     void Erase();
+#ifdef CONFIG_STUBUDDY_WS_ECHO
+    using PacketSink = void (*)(void*, const uint8_t*, size_t);
+    void SetPacketSink(PacketSink sink, void* context) {
+        sink_ = sink;
+        sink_context_ = context;
+    }
+    esp_err_t FinishCapture(size_t samples);
+    esp_err_t DecodeEcho(int16_t* pcm, size_t samples, bool (*proceed)(void*), void* context);
+    OpusPacketStore& echo_store() { return *packets_; }
+    size_t packet_limit() const { return packet_capacity_; }
+    size_t delay() const { return delay_; }
+    size_t frames() const { return encoded_frames_; }
+#endif
 
 private:
     esp_err_t Check(int result, const char* operation);
@@ -44,5 +57,10 @@ private:
     unsigned encode_max_us_ = 0;
     unsigned decode_max_us_ = 0;
     bool capturing_ = false;
+#ifdef CONFIG_STUBUDDY_WS_ECHO
+    PacketSink sink_ = nullptr;
+    void* sink_context_ = nullptr;
+    size_t encoded_frames_ = 0;
+#endif
 };
 }  // namespace stubuddy

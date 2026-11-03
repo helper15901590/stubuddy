@@ -38,6 +38,14 @@ config STUBUDDY_OPUS_LOOPBACK
         Encode 16kHz mono PCM in 60ms frames while recording, then decode
         locally for replay. No cloud connection. Use the wifi-opus-ptt variant.
 
+config STUBUDDY_WS_ECHO
+    bool "Enable stubuddy LAN WebSocket echo (checkpoint 3.6.1)"
+    depends on STUBUDDY_OPUS_LOOPBACK
+    default n
+    help
+        Private authenticated echo test, with bounded audio queues and round IDs.
+        Configure the ignored local endpoint with stubuddy/server/ws-echo/configure.py.
+
 config OTA_URL
     string "Default OTA URL"
     default "https://api.tenclass.net/xiaozhi/ota/"

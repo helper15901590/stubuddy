@@ -9,6 +9,9 @@
 #ifdef CONFIG_STUBUDDY_OPUS_LOOPBACK
 #include "opus_loopback.h"
 #endif
+#ifdef CONFIG_STUBUDDY_WS_ECHO
+#include "ws_echo.h"
+#endif
 
 #ifdef CONFIG_STUBUDDY_STATUS_LED
 #include "status_led.h"
@@ -35,7 +38,11 @@ constexpr char kTag[] = "STUBUDDY_PTT";
 #ifdef CONFIG_STUBUDDY_SOFTAP_SETUP
 stubuddy::WifiSetup wifi_setup;
 #endif
-#ifdef CONFIG_STUBUDDY_OPUS_LOOPBACK
+#ifdef CONFIG_STUBUDDY_WS_ECHO
+constexpr char kCheckpoint[] = "3.6.1";
+stubuddy::OpusLoopback opus_loopback;
+stubuddy::WsEcho ws_echo;
+#elif defined(CONFIG_STUBUDDY_OPUS_LOOPBACK)
 constexpr char kCheckpoint[] = "3.5";
 stubuddy::OpusLoopback opus_loopback;
 #elif defined(CONFIG_STUBUDDY_SOFTAP_SETUP)
@@ -136,7 +143,22 @@ esp_err_t AwaitNetworkReady(AudioCodec& codec) {
             ESP_RETURN_ON_ERROR(stubuddy::PlayWifiCue(codec, status_led, cue), kTag,
                                 "WiFi prompt failed");
         }
-        if (wifi_setup.online() && !wifi_setup.has_cue()) {
+#ifdef CONFIG_STUBUDDY_WS_ECHO
+        if (ws_echo.TakeFaultNotice()) {
+            handled_cue = true;
+            ESP_RETURN_ON_ERROR(stubuddy::PlayWifiCue(codec, status_led, stubuddy::WifiCue::Failed),
+                                kTag, "WS failure cue failed");
+        }
+        const bool service_ready = ws_echo.ready();
+        if (wifi_setup.online() && !service_ready)
+            status_led.SetState(stubuddy::LedState::ModelWaiting);
+#else
+        const bool service_ready = true;
+#endif
+        if (wifi_setup.online() && !wifi_setup.has_cue() && service_ready) {
+#ifdef CONFIG_STUBUDDY_WS_ECHO
+            status_led.SetState(stubuddy::LedState::Idle);
+#endif
             if (first_ready || waited || handled_cue)
                 ESP_LOGI(kTag, "NETWORK READY: local PTT available after a fresh release gate");
             first_ready = false;
@@ -148,7 +170,9 @@ esp_err_t AwaitNetworkReady(AudioCodec& codec) {
 #endif
 
 unsigned NetworkEpoch() {
-#ifdef CONFIG_STUBUDDY_SOFTAP_SETUP
+#ifdef CONFIG_STUBUDDY_WS_ECHO
+    return wifi_setup.link_epoch() + ws_echo.epoch();
+#elif defined(CONFIG_STUBUDDY_SOFTAP_SETUP)
     return wifi_setup.link_epoch();
 #else
     return 0;
@@ -157,8 +181,12 @@ unsigned NetworkEpoch() {
 
 bool IdleSessionCurrent(unsigned epoch) {
 #ifdef CONFIG_STUBUDDY_SOFTAP_SETUP
-    const bool online = wifi_setup.online();
-    const unsigned current_epoch = wifi_setup.link_epoch();
+    const bool online = wifi_setup.online()
+#ifdef CONFIG_STUBUDDY_WS_ECHO
+                        && ws_echo.ready()
+#endif
+        ;
+    const unsigned current_epoch = NetworkEpoch();
     return stubuddy::NetworkRecordingAllowed(online, epoch, current_epoch, wifi_setup.has_cue());
 #else
     (void)epoch;
@@ -167,6 +195,65 @@ bool IdleSessionCurrent(unsigned epoch) {
 }
 
 enum class ReplayOutcome { Finished, Interrupted, CaptureStarted };
+
+#ifdef CONFIG_STUBUDDY_WS_ECHO
+// Called only by the audio owner, including while awaiting/decoding the echo.
+esp_err_t InterruptWaitingEcho(AudioCodec& codec, ReplayOutcome& outcome) {
+    ws_echo.Cancel();
+    opus_loopback.Discard();
+    outcome = ReplayOutcome::Interrupted;
+    status_led.SetPhase(stubuddy::PttLedPhase::ReleaseGate);
+    if (wifi_setup.online() && ws_echo.ready()) {
+        const unsigned started = Milliseconds();
+        codec.EnableInput(true);
+        ESP_RETURN_ON_FALSE(codec.input_enabled() && !codec.HasInputError(), ESP_FAIL, kTag,
+                            "Cannot capture after echo wait interruption");
+        status_led.SetPhase(stubuddy::PttLedPhase::Recording);
+        outcome = ReplayOutcome::CaptureStarted;
+        ESP_LOGI(kTag, "INPUT HANDOFF: %u ms; old echo cancelled; keep holding to record",
+                 Milliseconds() - started);
+    }
+    return ESP_OK;
+}
+
+esp_err_t ReceiveEcho(AudioCodec& codec, int16_t* recording, size_t samples, size_t frames,
+                      stubuddy::PttButton& button, ReplayOutcome& outcome, bool& decoded) {
+    decoded = false;
+    if (!ws_echo.Finish(samples, opus_loopback.delay(), frames))
+        return ESP_OK;  // Recoverable network failure. Never use local PCM.
+    status_led.SetState(stubuddy::LedState::ModelWaiting);
+    stubuddy::PlaybackInterrupt interrupt(button.pressed());
+    while (!ws_echo.done()) {
+        button.Update(RawButtonPressed(), Milliseconds());
+        if (interrupt.Update(button.pressed()))
+            return InterruptWaitingEcho(codec, outcome);
+        if (ws_echo.round_failed())
+            return ESP_OK;
+        if (Milliseconds() - ws_echo.progress_at() >= stubuddy::echo::kProgressTimeoutMs) {
+            ws_echo.Timeout();
+            return ESP_OK;
+        }
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    struct DecodeContext {
+        stubuddy::PttButton& button;
+        stubuddy::PlaybackInterrupt& interrupt;
+        bool cancelled = false;
+    } context{button, interrupt};
+    const auto proceed = [](void* raw) {
+        auto& state = *static_cast<DecodeContext*>(raw);
+        state.button.Update(RawButtonPressed(), Milliseconds());
+        state.cancelled = state.interrupt.Update(state.button.pressed());
+        return !state.cancelled;
+    };
+    const esp_err_t result = opus_loopback.DecodeEcho(recording, samples, proceed, &context);
+    if (context.cancelled)
+        return InterruptWaitingEcho(codec, outcome);
+    ESP_RETURN_ON_ERROR(result, kTag, "Returned Opus decode failed");
+    decoded = true;
+    return ESP_OK;
+}
+#endif
 
 esp_err_t Replay(AudioCodec& codec, const int16_t* recording, size_t count,
                  std::vector<int16_t>& block, unsigned round, stubuddy::PttButton& button,
@@ -199,6 +286,9 @@ esp_err_t Replay(AudioCodec& codec, const int16_t* recording, size_t count,
         if (interrupt.Update(button.pressed())) {
             const unsigned handoff_start = Milliseconds();
             codec.AbortOutput();
+#ifdef CONFIG_STUBUDDY_WS_ECHO
+            ws_echo.Cancel();
+#endif
 #ifdef CONFIG_STUBUDDY_OPUS_LOOPBACK
             opus_loopback.Discard();
             ESP_LOGI(kTag, "OPUS DISCARD: old packet stream invalidated; no old audio resumes");
@@ -210,7 +300,11 @@ esp_err_t Replay(AudioCodec& codec, const int16_t* recording, size_t count,
             // A fresh user press outranks queued status sounds. Require a
             // continuous online link, but leave those sounds queued until idle.
             const unsigned new_epoch = NetworkEpoch();
-            const bool online = wifi_setup.online();
+            const bool online = wifi_setup.online()
+#ifdef CONFIG_STUBUDDY_WS_ECHO
+                                && ws_echo.ready()
+#endif
+                ;
             const unsigned current_epoch = NetworkEpoch();
             if (stubuddy::NetworkRecordingAllowed(online, new_epoch, current_epoch, false)) {
                 codec.EnableInput(true);
@@ -252,6 +346,13 @@ esp_err_t RunPtt(AudioCodec& codec) {
     ESP_RETURN_ON_ERROR(InitializeButton(), kTag, "GPIO15 input setup failed");
 #ifdef CONFIG_STUBUDDY_OPUS_LOOPBACK
     ESP_RETURN_ON_ERROR(opus_loopback.Initialize(), kTag, "Opus loopback initialization failed");
+#endif
+#ifdef CONFIG_STUBUDDY_WS_ECHO
+    ESP_RETURN_ON_ERROR(
+        ws_echo.Start(wifi_setup, opus_loopback.echo_store(), opus_loopback.packet_limit()), kTag,
+        "WS initialization failed");
+    opus_loopback.SetPacketSink(
+        [](void*, const uint8_t* data, size_t size) { ws_echo.PushAudio(data, size); }, nullptr);
 #endif
     std::unique_ptr<int16_t, RecordingDeleter> recording(static_cast<int16_t*>(
         heap_caps_malloc(kRecordingBytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)));
@@ -321,6 +422,10 @@ esp_err_t RunPtt(AudioCodec& codec) {
 #ifdef CONFIG_STUBUDDY_OPUS_LOOPBACK
         ESP_RETURN_ON_ERROR(opus_loopback.Begin(round + 1), kTag, "Opus round reset failed");
 #endif
+#ifdef CONFIG_STUBUDDY_WS_ECHO
+        if (!ws_echo.Begin(round + 1))
+            ESP_LOGW(kTag, "WS ROUND FAILED AT START: finish capture, then wait for service");
+#endif
         // Admission is complete. From here through replay, link changes never
         // cut the current round short; only the next idle session is gated.
         status_led.SetPhase(stubuddy::PttLedPhase::Recording);
@@ -349,16 +454,38 @@ esp_err_t RunPtt(AudioCodec& codec) {
         if (limit)
             ESP_LOGI(kTag, "LIMIT: 60 seconds reached; LED OFF applied + 150ms; automatic replay");
         ReplayOutcome outcome = ReplayOutcome::Finished;
-        if (count < kMinSamples)
+        if (count < kMinSamples) {
             ESP_LOGI(kTag, "DROP: recording shorter than 300 ms; no replay");
-        else {
-#ifdef CONFIG_STUBUDDY_OPUS_LOOPBACK
+#ifdef CONFIG_STUBUDDY_WS_ECHO
+            ws_echo.Cancel();
+#endif
+        } else {
+#ifdef CONFIG_STUBUDDY_WS_ECHO
+            ESP_RETURN_ON_ERROR(opus_loopback.FinishCapture(count), kTag,
+                                "Remote encode finish failed");
+            bool decoded = false;
+            ESP_RETURN_ON_ERROR(ReceiveEcho(codec, recording.get(), count, opus_loopback.frames(),
+                                            button, outcome, decoded),
+                                kTag, "Echo receive failed");
+            if (decoded) {
+                ESP_RETURN_ON_ERROR(
+                    Replay(codec, recording.get(), count, block, round, button, outcome), kTag,
+                    "Remote replay failed");
+            } else if (outcome == ReplayOutcome::Finished) {
+                ESP_LOGW(kTag,
+                         "ROUND FAILED: %u; no server echo played; reconnect before next round",
+                         round);
+                status_led.SetPhase(stubuddy::PttLedPhase::ReleaseGate);
+            }
+#elif defined(CONFIG_STUBUDDY_OPUS_LOOPBACK)
             ESP_RETURN_ON_ERROR(opus_loopback.FinishAndDecode(recording.get(), count), kTag,
                                 "Opus decode failed; raw PCM is never replayed as a fallback");
 #endif
+#ifndef CONFIG_STUBUDDY_WS_ECHO
             ESP_RETURN_ON_ERROR(
                 Replay(codec, recording.get(), count, block, round, button, outcome), kTag,
                 "Replay failed");
+#endif
         }
         if (outcome == ReplayOutcome::CaptureStarted) {
             // Reuse the same bounded buffer immediately. The next capture only
@@ -371,6 +498,9 @@ esp_err_t RunPtt(AudioCodec& codec) {
         }
         std::memset(recording.get(), 0, dirty_samples * sizeof(int16_t));
         dirty_samples = 0;
+#ifdef CONFIG_STUBUDDY_WS_ECHO
+        ws_echo.Cancel();
+#endif
 #ifdef CONFIG_STUBUDDY_OPUS_LOOPBACK
         opus_loopback.Erase();
 #endif
@@ -414,6 +544,9 @@ extern "C" void app_main() {
         }
 #endif
         const esp_err_t result = RunPtt(*codec);
+#ifdef CONFIG_STUBUDDY_WS_ECHO
+        ws_echo.Cancel();
+#endif
 #ifdef CONFIG_STUBUDDY_OPUS_LOOPBACK
         // RunPtt has stopped both I2S directions. Clear any partial encoded
         // recording on the failure path as well as on normal round completion.

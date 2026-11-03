@@ -2,6 +2,10 @@
 # The root CMakeLists sets this profile flag before dependency resolution.
 # It must not depend on late Kconfig values: full builds require fonts early.
 dependencies:
+  espressif/esp_websocket_client:
+    version: "==1.8.0"
+    matches:
+      - if: "$XIAOZHI_STUBUDDY_WS_PROFILE == 1"
   espressif/cjson:
     version: ^1.7.19
     matches:

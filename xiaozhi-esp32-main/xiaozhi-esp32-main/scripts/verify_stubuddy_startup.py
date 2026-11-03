@@ -16,14 +16,16 @@ def verify(build_dir: Path, variant: str = "startup") -> None:
     for option in ("BOARD_TYPE_STUBUDDY_S3_N16R8", "XIAOZHI_HEADLESS_STARTUP", "SPIRAM",
                    "SPIRAM_MODE_OCT", "FLASH_NONE_ASSETS"):
         assert config.get(option) is True, f"Required config is missing: {option}"
-    opus = variant == "wifi-opus-ptt"
-    wifi = variant in ("wifi-ptt", "wifi-opus-ptt")
-    ptt = variant in ("ptt", "ptt-led", "wifi-ptt", "wifi-opus-ptt")
-    led = variant in ("ptt-led", "wifi-ptt", "wifi-opus-ptt")
+    websocket = variant == "ws-echo"
+    opus = variant in ("wifi-opus-ptt", "ws-echo")
+    wifi = variant in ("wifi-ptt", "wifi-opus-ptt", "ws-echo")
+    ptt = variant in ("ptt", "ptt-led", "wifi-ptt", "wifi-opus-ptt", "ws-echo")
+    led = variant in ("ptt-led", "wifi-ptt", "wifi-opus-ptt", "ws-echo")
     assert bool(config.get("STUBUDDY_PTT_SELFTEST")) == ptt, "Wrong startup/PTT mode"
     assert bool(config.get("STUBUDDY_STATUS_LED")) == led, "Wrong LED mode"
     assert bool(config.get("STUBUDDY_SOFTAP_SETUP")) == wifi, "Wrong Wi-Fi setup mode"
     assert bool(config.get("STUBUDDY_OPUS_LOOPBACK")) == opus, "Wrong Opus loopback mode"
+    assert bool(config.get("STUBUDDY_WS_ECHO")) == websocket, "Wrong WebSocket echo mode"
     assert not config.get("BT_ENABLED"), "Bluetooth must remain disabled"
     sources = {Path(source).name for source in project["build_component_info"]["main"]["sources"]}
     expected = "ptt_main.cc" if ptt else "startup_main.cc"
@@ -35,8 +37,13 @@ def verify(build_dir: Path, variant: str = "startup") -> None:
     assert ("esp_wifi" in project["build_components"]) == wifi, "Wrong Wi-Fi dependency selection"
     assert ("opus_loopback.cc" in sources) == opus, "Wrong Opus source selection"
     assert ("espressif__esp_audio_codec" in project["build_components"]) == opus, "Wrong Opus dependency selection"
+    assert ("ws_echo.cc" in sources) == websocket, "Wrong WebSocket source selection"
+    assert ("espressif__esp_websocket_client" in project["build_components"]) == websocket, "Wrong WebSocket dependency selection"
     if opus:
         assert config.get("ESP_MAIN_TASK_STACK_SIZE", 0) >= 32768, "Opus stack budget missing"
+    if websocket:
+        assert config.get("WS_TRANSPORT") is True, "WebSocket transport is disabled"
+        assert config.get("ESP_WS_CLIENT_SEPARATE_TX_LOCK") is True, "Separate WS send/receive locking is required"
     excluded = [name for name in project["build_components"]
                 if name in {"bt", "esp_lcd", "lvgl"}
                 or any(token in name for token in ("camera", "esp_video", "lvgl", "fonts", "esp-sr"))]
@@ -62,12 +69,14 @@ def verify(build_dir: Path, variant: str = "startup") -> None:
     assert "StubuddyAudioCodec" in symbols, "Board AudioCodec adapter is missing"
     for symbol in ("esp_opus_enc_process", "esp_opus_dec_decode"):
         assert (any(line.split()[-1] == symbol for line in symbols.splitlines() if line.split())) == opus, f"Wrong codec linkage: {symbol}"
+    assert (any(line.split()[-1] == "esp_websocket_client_send_bin" for line in symbols.splitlines() if line.split())) == websocket, "Wrong WebSocket linkage"
     size = (build_dir / "xiaozhi.bin").stat().st_size
     assert size < app_capacity, "Application exceeds the validation partition"
     print(f"PASS: stubuddy-s3-n16r8-{variant} / ESP32-S3 N16R8")
     print("PASS: no display, camera, BLE or font components")
     print(f"PASS: Wi-Fi {'enabled with SoftAP provisioning' if wifi else 'excluded'}")
-    print(f"PASS: Opus {'encoder and decoder linked; local loopback' if opus else 'excluded'}")
+    print(f"PASS: Opus {'encoder and decoder linked' if opus else 'excluded'}")
+    print(f"PASS: WebSocket {'private echo/1 enabled' if websocket else 'excluded'}")
     print("PASS: NVS 0x9000+0x6000 preserved; application starts at 0x10000")
     print("PASS: one board factory, one app_main, real AudioCodec adapter")
     print(f"PASS: xiaozhi.bin = {size} bytes / {app_capacity}-byte app partition; hardware audibility remains to be checked")
@@ -75,7 +84,7 @@ def verify(build_dir: Path, variant: str = "startup") -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--variant", choices=("startup", "ptt", "ptt-led", "wifi-ptt", "wifi-opus-ptt"), default="startup")
+    parser.add_argument("--variant", choices=("startup", "ptt", "ptt-led", "wifi-ptt", "wifi-opus-ptt", "ws-echo"), default="startup")
     args = parser.parse_args()
     try:
         verify(ROOT / "build", args.variant)

@@ -98,6 +98,9 @@ esp_err_t OpusLoopback::Begin(unsigned round) {
     ESP_RETURN_ON_ERROR(Check(esp_opus_dec_reset(decoder_), "reset decoder"), kTag,
                         "Decoder reset failed");
     packets_->Reset();
+#ifdef CONFIG_STUBUDDY_WS_ECHO
+    encoded_frames_ = 0;
+#endif
     pending_ = samples_ = 0;
     round_ = round;
     encode_us_ = encode_max_us_ = decode_max_us_ = 0;
@@ -119,9 +122,16 @@ esp_err_t OpusLoopback::EncodeFrame() {
     encode_us_ += elapsed;
     encode_max_us_ = std::max(encode_max_us_, elapsed);
     ESP_RETURN_ON_ERROR(Check(result, "encode frame"), kTag, "Encoding failed");
-    ESP_RETURN_ON_FALSE(out.encoded_bytes > 0 && out.encoded_bytes <= packet_capacity_ &&
-                            packets_->Push(packet_, out.encoded_bytes),
+    ESP_RETURN_ON_FALSE(out.encoded_bytes > 0 && out.encoded_bytes <= packet_capacity_,
                         ESP_ERR_INVALID_SIZE, kTag, "Invalid packet or bounded storage exhausted");
+#ifdef CONFIG_STUBUDDY_WS_ECHO
+    ++encoded_frames_;
+    if (sink_)
+        sink_(sink_context_, packet_, out.encoded_bytes);  // Non-blocking bounded queue only.
+    else
+#endif
+        ESP_RETURN_ON_FALSE(packets_->Push(packet_, out.encoded_bytes), ESP_ERR_NO_MEM, kTag,
+                            "Bounded packet storage exhausted");
     pending_ = 0;
     return ESP_OK;
 }
@@ -268,4 +278,50 @@ void OpusLoopback::Erase() {
     if (packet_)
         std::memset(packet_, 0, packet_capacity_);
 }
+
+#ifdef CONFIG_STUBUDDY_WS_ECHO
+esp_err_t OpusLoopback::FinishCapture(size_t samples) {
+    ESP_RETURN_ON_FALSE(capturing_ && sink_ && samples == samples_ && samples > 0,
+                        ESP_ERR_INVALID_STATE, kTag, "Invalid remote capture state");
+    const size_t needed = OpusPacketsNeeded(samples, delay_);
+    ESP_RETURN_ON_FALSE(needed > 0, ESP_ERR_INVALID_SIZE, kTag, "Invalid capture length");
+    while (encoded_frames_ < needed) {
+        std::fill(input_.begin() + pending_, input_.end(), 0);
+        ESP_RETURN_ON_ERROR(EncodeFrame(), kTag, "Remote tail encode failed");
+        vTaskDelay(1);
+    }
+    capturing_ = false;
+    ESP_RETURN_ON_FALSE(encode_us_ / encoded_frames_ < kFrameUs, ESP_ERR_TIMEOUT, kTag,
+                        "Encoding cannot sustain realtime capture");
+    ESP_LOGI(kTag, "UPLINK ENCODED: round=%u; samples=%u; frames=%u; enc_max=%u us; errors=%u",
+             round_, unsigned(samples), unsigned(encoded_frames_), encode_max_us_, errors_);
+    return ESP_OK;
+}
+
+esp_err_t OpusLoopback::DecodeEcho(int16_t* pcm, size_t samples, bool (*proceed)(void*),
+                                   void* context) {
+    ESP_RETURN_ON_FALSE(!capturing_ && pcm && samples == samples_ && samples > 0 &&
+                            packets_->count() == OpusPacketsNeeded(samples, delay_),
+                        ESP_ERR_INVALID_STATE, kTag, "Incomplete remote echo");
+    ESP_RETURN_ON_ERROR(Check(esp_opus_dec_reset(decoder_), "reset echo decoder"), kTag,
+                        "Echo decoder reset failed");
+    size_t cursor = 0, copied = 0;
+    for (size_t index = 0; index < packets_->count(); ++index) {
+        if (proceed && !proceed(context))
+            return ESP_ERR_INVALID_STATE;  // User interruption, not a codec error.
+        OpusPacketView packet;
+        ESP_RETURN_ON_FALSE(packets_->Next(cursor, packet), ESP_FAIL, kTag, "Bad returned packet");
+        ESP_RETURN_ON_ERROR(DecodePacket(packet), kTag, "Remote echo decode failed");
+        copied += CopyOpusPcm(decoded_.data(), decoded_.size(), index * kOpusFrameSamples, delay_,
+                              samples, pcm, samples);
+        if (index % 16 == 15)
+            vTaskDelay(1);
+    }
+    ESP_RETURN_ON_FALSE(copied == samples && cursor == packets_->used(), ESP_ERR_INVALID_SIZE, kTag,
+                        "Echo sample count mismatch");
+    ESP_LOGI(kTag, "REMOTE DECODE: round=%u; decoded_samples=%u; errors=%u; dec_max=%u us", round_,
+             unsigned(copied), errors_, decode_max_us_);
+    return ESP_OK;
+}
+#endif
 }  // namespace stubuddy
