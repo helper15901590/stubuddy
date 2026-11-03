@@ -21,21 +21,25 @@ if(BOARD_NAME STREQUAL "stubuddy-s3-n16r8-startup" OR
    BOARD_NAME STREQUAL "stubuddy-s3-n16r8-ptt-led" OR
    BOARD_NAME STREQUAL "stubuddy-s3-n16r8-wifi-ptt" OR
    BOARD_NAME STREQUAL "stubuddy-s3-n16r8-wifi-opus-ptt" OR
-   BOARD_NAME STREQUAL "stubuddy-s3-n16r8-ws-echo")
+   BOARD_NAME STREQUAL "stubuddy-s3-n16r8-ws-echo" OR
+   BOARD_NAME STREQUAL "stubuddy-s3-n16r8-wss-echo")
     idf_build_set_property(XIAOZHI_HEADLESS_STARTUP ON)
     idf_build_set_property(STUBUDDY_VALIDATION_VARIANT "${BOARD_NAME}")
     set(ENV{XIAOZHI_HEADLESS_STARTUP_PROFILE} "1")
 endif()
 if(BOARD_NAME STREQUAL "stubuddy-s3-n16r8-wifi-ptt" OR
    BOARD_NAME STREQUAL "stubuddy-s3-n16r8-wifi-opus-ptt" OR
-   BOARD_NAME STREQUAL "stubuddy-s3-n16r8-ws-echo")
+   BOARD_NAME STREQUAL "stubuddy-s3-n16r8-ws-echo" OR
+   BOARD_NAME STREQUAL "stubuddy-s3-n16r8-wss-echo")
     set(ENV{XIAOZHI_STUBUDDY_WIFI_PROFILE} "1")
 endif()
 if(BOARD_NAME STREQUAL "stubuddy-s3-n16r8-wifi-opus-ptt" OR
-   BOARD_NAME STREQUAL "stubuddy-s3-n16r8-ws-echo")
+   BOARD_NAME STREQUAL "stubuddy-s3-n16r8-ws-echo" OR
+   BOARD_NAME STREQUAL "stubuddy-s3-n16r8-wss-echo")
     set(ENV{XIAOZHI_STUBUDDY_OPUS_PROFILE} "1")
 endif()
-if(BOARD_NAME STREQUAL "stubuddy-s3-n16r8-ws-echo")
+if(BOARD_NAME STREQUAL "stubuddy-s3-n16r8-ws-echo" OR
+   BOARD_NAME STREQUAL "stubuddy-s3-n16r8-wss-echo")
     set(ENV{XIAOZHI_STUBUDDY_WS_PROFILE} "1")
 endif()
 

@@ -1,4 +1,4 @@
-"""Private LAN echo service. No model providers, recording files or codec dependency."""
+"""Private echo backend for LAN or the loopback-only ECS gateway."""
 import argparse
 import asyncio
 import contextlib
@@ -164,7 +164,7 @@ class EchoService:
 
 async def main(args):
     try:
-        config = json.loads((ROOT / ".local.json").read_text(encoding="utf-8"))
+        config = json.loads(args.config.read_text(encoding="utf-8"))
         service = EchoService(config["token"], echo_delay=args.echo_delay)
     except (OSError, ValueError, KeyError) as error:
         raise SystemExit("Run configure.py before starting the echo service") from error
@@ -177,6 +177,7 @@ async def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--config", type=Path, default=ROOT / ".local.json")
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--echo-delay", type=float, default=0, help="0..10 seconds, for wait/abort acceptance")
     args = parser.parse_args()

@@ -1,4 +1,6 @@
 .local.json
+.cloud.json
+.cloud-deploy.tar.gz
 __pycache__/
 .venv/
 *.log

@@ -128,7 +128,7 @@ STUBUDDY_PTT: WAIT RELEASE: ... LED OFF
 - 回放后按住导致灯亮：反馈REPLAY STOP至下一次IDLE的日志，属于本检查点必须修复的问题。
 - 出现ERROR/TRIPLE-FLASH：同时查前面的FAILED/I2S错误；保留日志后复位再测。
 - LED初始化失败会停止进入录放，检查最早的PWM或LED timer错误。
-- 端口被占用时先Ctrl+]关闭其他monitor或退出其他串口工具；烧录连接失败沿用已验证的BOOT/RESET方法。
+- 端口被占用时先Ctrl+]关闭其他monitor或退出其他串口工具；烧录连接失败时拔插USB、重新枚举COM端口并使用USB自动下载。当前实物没有BOOT/RST按键。
 
 需要回3.2进行对照时，在同一主工程目录执行：
 

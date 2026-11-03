@@ -39,7 +39,11 @@ constexpr char kTag[] = "STUBUDDY_PTT";
 stubuddy::WifiSetup wifi_setup;
 #endif
 #ifdef CONFIG_STUBUDDY_WS_ECHO
+#ifdef CONFIG_STUBUDDY_WSS_ECHO
+constexpr char kCheckpoint[] = "3.6.2";
+#else
 constexpr char kCheckpoint[] = "3.6.1";
+#endif
 stubuddy::OpusLoopback opus_loopback;
 stubuddy::WsEcho ws_echo;
 #elif defined(CONFIG_STUBUDDY_OPUS_LOOPBACK)

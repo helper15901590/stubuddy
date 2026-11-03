@@ -111,7 +111,7 @@ IDLE: ...
 
 - 没出现CHECKPOINT 3.2：核对目录和变体名，再完整编译/核对/烧录。
 - 等待WAIT RELEASE：先松开GPIO15按键，稳定后出现IDLE。
-- 端口占用：Ctrl+]退出其他monitor并关闭其他串口工具；下载连接失败沿用已验证的BOOT/RESET方法。
+- 端口占用：Ctrl+]退出其他monitor并关闭其他串口工具；下载连接失败时拔插USB、重新枚举COM端口并使用USB自动下载。当前实物没有BOOT/RST按键，GPIO15主键不能替代下载绑带信号。
 - 看到Very low input、FAILED、panic、看门狗复位或GPIO10冲突：保留从上电到故障的日志反馈，不继续跨阶段修改。
 - 需要回3.1：使用以下命令重编译后再烧录，不需要回退或删除源码。
 

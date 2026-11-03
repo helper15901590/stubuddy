@@ -1,5 +1,9 @@
 # stubuddy S3 N16R8：检查点3.1
 
+实物约束（2026-11-03确认）：只有GPIO15主按键，没有BOOT/RST实体按键。
+GPIO15上电按住用于配网，不是芯片下载按键。烧录使用原生USB-Serial/JTAG自动下载，
+需要重新上电时拔插USB。USB断连恢复步骤见 [WSS-ECHO-VALIDATION.md](WSS-ECHO-VALIDATION.md)。
+
 本板型位于小智主工程中，通过唯一的 `DECLARE_BOARD(StubuddyBoard)` 创建，复用原有 `Board`、`AudioCodec::OutputData()` 接口。
 本次只验收启动和一次本地提示音。独立诊断工程已验收的PTT、灯效、配网随后逐项迁移。
 
@@ -24,7 +28,11 @@
 3.5已提交 `a49b3ff`。当前3.6.1新增 `stubuddy-s3-n16r8-ws-echo`，
 配套Windows私有回声服务位于工作区的stubuddy/server/ws-echo；两端校验真实音频往返后才播放。
 本地配置、编译烧录和验收见 [WS-ECHO-VALIDATION.md](WS-ECHO-VALIDATION.md)。
-3.6.1已于2026-11-03通过用户真机验收：帧数、CRC和采样数一致，errors=0；60秒自动回放、等待/回放打断、服务重启、断网恢复及连续十轮均正常，无异常、无杂音，待Git提交。
+3.6.1已于2026-11-03通过用户真机验收：帧数、CRC和采样数一致，errors=0；60秒自动回放、等待/回放打断、服务重启、断网恢复及连续十轮均正常，无异常、无杂音，已提交5df51a4。
+
+当前3.6.2新增 `stubuddy-s3-n16r8-wss-echo`：联网校时、严格TLS验证、独立云端Token，
+配套ECS部署前检查和IP证书续期。操作见 [WSS-ECHO-VALIDATION.md](WSS-ECHO-VALIDATION.md)。
+本机软件验证通过；ECS部署、证书续期演练和电脑公网WSS自测PASS。2026-11-03用户在成功烧录后反馈测试成功，待建立3.6.2 Git检查点。
 
 | 身份 | 值 |
 | --- | --- |
@@ -109,7 +117,7 @@ STUBUDDY_CODEC: OUTPUT OFF: CTRL=LOW; I2S1 released
 STUBUDDY_STARTUP: DONE: local standby; amplifier OFF; LED OFF; no automatic repeat
 ```
 
-Ctrl+]退出串口监视。端口占用时先关闭其他串口工具；若烧录连接失败，按原先已验证的BOOT/RESET方式进入下载。
+Ctrl+]退出串口监视。端口占用时先关闭其他串口工具；连接失败时先拔插USB并重新枚举COM端口，使用USB自动下载。当前实物没有BOOT/RESET按键。
 看到旧的三次提示音或配网热点时，先核对工程目录与CHECKPOINT/variant日志是否正确。
 
 ## 软件验证记录

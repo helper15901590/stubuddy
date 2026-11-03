@@ -39,12 +39,20 @@ config STUBUDDY_OPUS_LOOPBACK
         locally for replay. No cloud connection. Use the wifi-opus-ptt variant.
 
 config STUBUDDY_WS_ECHO
-    bool "Enable stubuddy LAN WebSocket echo (checkpoint 3.6.1)"
+    bool "Enable stubuddy private WebSocket echo"
     depends on STUBUDDY_OPUS_LOOPBACK
     default n
     help
         Private authenticated echo test, with bounded audio queues and round IDs.
         Configure the ignored local endpoint with stubuddy/server/ws-echo/configure.py.
+
+config STUBUDDY_WSS_ECHO
+    bool "Enable stubuddy verified ECS/WSS echo (checkpoint 3.6.2)"
+    depends on STUBUDDY_WS_ECHO
+    default n
+    help
+        Require TLS certificate bundle, peer identity and validity verification.
+        Synchronize time before connecting. Use configure_cloud.py for this profile.
 
 config OTA_URL
     string "Default OTA URL"

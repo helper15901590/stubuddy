@@ -1,6 +1,19 @@
 #include "ws_echo.h"
 
-#if __has_include("stubuddy_echo_local.h")
+#ifdef CONFIG_STUBUDDY_WSS_ECHO
+#if __has_include("stubuddy_echo_cloud.h")
+#include "stubuddy_echo_cloud.h"
+#else
+#error "Run python stubuddy/server/ws-echo/configure_cloud.py --server-ip PUBLIC_IP first"
+#endif
+#include <esp_crt_bundle.h>
+#include <esp_netif_sntp.h>
+#include <ctime>
+#if defined(CONFIG_ESP_TLS_INSECURE) || defined(CONFIG_ESP_TLS_SKIP_SERVER_CERT_VERIFY) || \
+    !defined(CONFIG_MBEDTLS_CERTIFICATE_BUNDLE) || !defined(CONFIG_MBEDTLS_HAVE_TIME_DATE)
+#error "WSS requires CA bundle, certificate validity and peer verification"
+#endif
+#elif __has_include("stubuddy_echo_local.h")
 #include "stubuddy_echo_local.h"
 #else
 #error \
@@ -20,6 +33,11 @@
 #include <string>
 
 namespace stubuddy {
+#ifdef CONFIG_STUBUDDY_WSS_ECHO
+namespace echo_settings = echo_cloud;
+#else
+namespace echo_settings = echo_local;
+#endif
 namespace {
 constexpr char kTag[] = "STUBUDDY_WS";
 unsigned Now() { return static_cast<unsigned>(esp_timer_get_time() / 1000); }
@@ -38,10 +56,17 @@ bool Text(const cJSON* root, const char* name, const char* expected) {
 }  // namespace
 
 esp_err_t WsEcho::Start(WifiSetup& wifi, OpusPacketStore& received, size_t packet_limit) {
+#ifdef CONFIG_STUBUDDY_WSS_ECHO
+    constexpr char kScheme[] = "wss://";
+    constexpr char kTransport[] = "WSS";
+#else
+    constexpr char kScheme[] = "ws://";
+    constexpr char kTransport[] = "LAN";
+#endif
     ESP_RETURN_ON_FALSE(!client_ && packet_limit <= kOpusMaxPacketBytes &&
-                            std::strlen(echo_local::kToken) == 64 &&
-                            std::strncmp(echo_local::kUrl, "ws://", 5) == 0,
-                        ESP_ERR_INVALID_STATE, kTag, "Invalid LAN echo configuration");
+                            std::strlen(echo_settings::kToken) == 64 &&
+                            std::strncmp(echo_settings::kUrl, kScheme, sizeof(kScheme) - 1) == 0,
+                        ESP_ERR_INVALID_STATE, kTag, "Invalid echo transport configuration");
     wifi_ = &wifi;
     received_ = &received;
     packet_limit_ = packet_limit;
@@ -57,15 +82,20 @@ esp_err_t WsEcho::Start(WifiSetup& wifi, OpusPacketStore& received, size_t packe
     char device[18];
     std::snprintf(device, sizeof(device), "%02x:%02x:%02x:%02x:%02x:%02x", mac[0], mac[1], mac[2],
                   mac[3], mac[4], mac[5]);
-    const std::string headers = std::string("Authorization: Bearer ") + echo_local::kToken +
+    const std::string headers = std::string("Authorization: Bearer ") + echo_settings::kToken +
                                 "\r\nDevice-Id: " + device + "\r\nProtocol-Version: 1\r\n";
     esp_websocket_client_config_t config = {};
-    config.uri = echo_local::kUrl;
+    config.uri = echo_settings::kUrl;
     config.headers = headers.c_str();
     config.disable_auto_reconnect = false;
     config.enable_close_reconnect = true;
     config.reconnect_timeout_ms = 1000;
     config.network_timeout_ms = 2000;
+#ifdef CONFIG_STUBUDDY_WSS_ECHO
+    config.crt_bundle_attach = esp_crt_bundle_attach;
+    config.skip_cert_common_name_check = false;
+    config.network_timeout_ms = 10000;  // Allow public-network TCP/TLS handshakes.
+#endif
     config.buffer_size = 1024;
     config.task_stack = 8192;
     config.task_prio = 4;
@@ -77,8 +107,8 @@ esp_err_t WsEcho::Start(WifiSetup& wifi, OpusPacketStore& received, size_t packe
                         kTag, "Cannot register WS events");
     ESP_RETURN_ON_FALSE(xTaskCreate(WorkerEntry, "stubuddy_ws", 8192, this, 3, nullptr) == pdPASS,
                         ESP_ERR_NO_MEM, kTag, "Cannot create echo worker");
-    ESP_LOGI(kTag, "LAN ECHO: %s; token not logged; queue=%u frames/%u PSRAM bytes",
-             echo_local::kUrl, kQueueDepth, unsigned(kQueueDepth * sizeof(Command)));
+    ESP_LOGI(kTag, "%s ECHO: %s; token not logged; queue=%u frames/%u PSRAM bytes", kTransport,
+             echo_settings::kUrl, kQueueDepth, unsigned(kQueueDepth * sizeof(Command)));
     return ESP_OK;
 }
 
@@ -353,6 +383,35 @@ void WsEcho::WorkerEntry(void* context) { static_cast<WsEcho*>(context)->Worker(
 void WsEcho::Worker() {
     while (!wifi_->online())
         vTaskDelay(pdMS_TO_TICKS(100));
+#ifdef CONFIG_STUBUDDY_WSS_ECHO
+    // Only this worker waits for time. PTT/LED and Wi-Fi recovery remain live.
+    esp_sntp_config_t clock = ESP_NETIF_SNTP_DEFAULT_CONFIG_MULTIPLE(
+        2, ESP_SNTP_SERVER_LIST("ntp.aliyun.com", "time.cloudflare.com"));
+    if (esp_netif_sntp_init(&clock) != ESP_OK) {
+        ESP_LOGE(kTag, "TIME INIT FAILED: WSS remains unavailable");
+        Fault();
+        vTaskDelete(nullptr);
+        return;
+    }
+    ESP_LOGI(kTag, "TIME WAIT: synchronize before verified TLS; recording paused");
+    unsigned last_notice = Now();
+    bool synchronized = false;
+    while (true) {
+        if (!synchronized)
+            synchronized = esp_netif_sntp_sync_wait(pdMS_TO_TICKS(1000)) == ESP_OK &&
+                           std::time(nullptr) >= 1735689600;
+        if (synchronized && wifi_->online())
+            break;
+        if (Now() - last_notice >= 30000) {
+            ESP_LOGW(kTag, "TIME WAIT: check Internet/DNS/NTP; TLS verification stays required");
+            Fault();
+            last_notice = Now();
+        }
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+    ESP_LOGI(kTag, "TIME READY: epoch=%lld; CA/peer/validity checks enabled",
+             static_cast<long long>(std::time(nullptr)));
+#endif
     if (esp_websocket_client_start(client_) != ESP_OK) {
         Fault();
         vTaskDelete(nullptr);

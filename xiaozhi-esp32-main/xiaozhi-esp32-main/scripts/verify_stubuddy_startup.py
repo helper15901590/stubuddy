@@ -16,16 +16,24 @@ def verify(build_dir: Path, variant: str = "startup") -> None:
     for option in ("BOARD_TYPE_STUBUDDY_S3_N16R8", "XIAOZHI_HEADLESS_STARTUP", "SPIRAM",
                    "SPIRAM_MODE_OCT", "FLASH_NONE_ASSETS"):
         assert config.get(option) is True, f"Required config is missing: {option}"
-    websocket = variant == "ws-echo"
-    opus = variant in ("wifi-opus-ptt", "ws-echo")
-    wifi = variant in ("wifi-ptt", "wifi-opus-ptt", "ws-echo")
-    ptt = variant in ("ptt", "ptt-led", "wifi-ptt", "wifi-opus-ptt", "ws-echo")
-    led = variant in ("ptt-led", "wifi-ptt", "wifi-opus-ptt", "ws-echo")
+    secure = variant == "wss-echo"
+    websocket = variant in ("ws-echo", "wss-echo")
+    opus = variant in ("wifi-opus-ptt", "ws-echo", "wss-echo")
+    wifi = variant in ("wifi-ptt", "wifi-opus-ptt", "ws-echo", "wss-echo")
+    ptt = variant in ("ptt", "ptt-led", "wifi-ptt", "wifi-opus-ptt", "ws-echo", "wss-echo")
+    led = variant in ("ptt-led", "wifi-ptt", "wifi-opus-ptt", "ws-echo", "wss-echo")
     assert bool(config.get("STUBUDDY_PTT_SELFTEST")) == ptt, "Wrong startup/PTT mode"
     assert bool(config.get("STUBUDDY_STATUS_LED")) == led, "Wrong LED mode"
     assert bool(config.get("STUBUDDY_SOFTAP_SETUP")) == wifi, "Wrong Wi-Fi setup mode"
     assert bool(config.get("STUBUDDY_OPUS_LOOPBACK")) == opus, "Wrong Opus loopback mode"
     assert bool(config.get("STUBUDDY_WS_ECHO")) == websocket, "Wrong WebSocket echo mode"
+    assert bool(config.get("STUBUDDY_WSS_ECHO")) == secure, "Wrong TLS echo mode"
+    if secure:
+        for option in ("MBEDTLS_CERTIFICATE_BUNDLE", "MBEDTLS_HAVE_TIME_DATE"):
+            assert config.get(option) is True, f"TLS verification required: {option}"
+        for option in ("ESP_TLS_INSECURE", "ESP_TLS_SKIP_SERVER_CERT_VERIFY"):
+            assert not config.get(option), f"Insecure TLS setting: {option}"
+        assert config.get("LWIP_SNTP_MAX_SERVERS", 0) >= 2, "Two NTP servers required"
     assert not config.get("BT_ENABLED"), "Bluetooth must remain disabled"
     sources = {Path(source).name for source in project["build_component_info"]["main"]["sources"]}
     expected = "ptt_main.cc" if ptt else "startup_main.cc"
@@ -70,6 +78,9 @@ def verify(build_dir: Path, variant: str = "startup") -> None:
     for symbol in ("esp_opus_enc_process", "esp_opus_dec_decode"):
         assert (any(line.split()[-1] == symbol for line in symbols.splitlines() if line.split())) == opus, f"Wrong codec linkage: {symbol}"
     assert (any(line.split()[-1] == "esp_websocket_client_send_bin" for line in symbols.splitlines() if line.split())) == websocket, "Wrong WebSocket linkage"
+    if secure:
+        for symbol in ("esp_crt_bundle_attach", "esp_netif_sntp_init"):
+            assert any(line.split()[-1] == symbol for line in symbols.splitlines() if line.split()), f"Missing verified TLS/time: {symbol}"
     size = (build_dir / "xiaozhi.bin").stat().st_size
     assert size < app_capacity, "Application exceeds the validation partition"
     print(f"PASS: stubuddy-s3-n16r8-{variant} / ESP32-S3 N16R8")
@@ -77,6 +88,8 @@ def verify(build_dir: Path, variant: str = "startup") -> None:
     print(f"PASS: Wi-Fi {'enabled with SoftAP provisioning' if wifi else 'excluded'}")
     print(f"PASS: Opus {'encoder and decoder linked' if opus else 'excluded'}")
     print(f"PASS: WebSocket {'private echo/1 enabled' if websocket else 'excluded'}")
+    if secure:
+        print("PASS: WSS certificate bundle, peer/validity checks and SNTP enabled; no insecure bypass")
     print("PASS: NVS 0x9000+0x6000 preserved; application starts at 0x10000")
     print("PASS: one board factory, one app_main, real AudioCodec adapter")
     print(f"PASS: xiaozhi.bin = {size} bytes / {app_capacity}-byte app partition; hardware audibility remains to be checked")
@@ -84,7 +97,7 @@ def verify(build_dir: Path, variant: str = "startup") -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--variant", choices=("startup", "ptt", "ptt-led", "wifi-ptt", "wifi-opus-ptt", "ws-echo"), default="startup")
+    parser.add_argument("--variant", choices=("startup", "ptt", "ptt-led", "wifi-ptt", "wifi-opus-ptt", "ws-echo", "wss-echo"), default="startup")
     args = parser.parse_args()
     try:
         verify(ROOT / "build", args.variant)

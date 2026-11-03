@@ -89,7 +89,7 @@ idf.py -p COM4 -b 115200 flash monitor
 ```
 
 烧录会替换设备当前程序。端口占用时关闭其他串口工具再试。
-停在 `Connecting...` 时按住BOOT，按RESET/EN再松开BOOT；没有复位键则按住BOOT插USB、松开后重试。
+停在 `Connecting...` 时先关闭其他串口工具，拔插USB后重新枚举COM端口并使用USB自动下载。当前实物只有GPIO15主按键，没有BOOT/RST实体按键。
 日志窗口按 `Ctrl+T` 再按 `Ctrl+R` 可复位；按 `Ctrl+]` 退出。
 
 ## 预期日志
@@ -124,7 +124,7 @@ IDLE: hold GPIO15 to record; release to replay (0.3-60 seconds)
 | 开机按住 | 按住GPIO15再上电，等待松开后才进入IDLE，不自动录音 |
 | 连续操作 | 完成十轮录放，无异常复位、无持续杂音；检查ROUND DONE内存是否持续下降 |
 
-按键需使用GPIO15的业务按键，BOOT/IO0是下载键。无反应时反馈完整启动日志与按下时的日志。
+按键为唯一的GPIO15业务主键。GPIO0只是芯片下载模式绑带信号，当前实物没有BOOT按键。无反应时反馈完整启动日志与按下时的日志。
 回放无声或噪声时一并反馈CAPTURE统计，先保持当前已验收的音频配置。
 
 ## 功放控制引脚生命周期
