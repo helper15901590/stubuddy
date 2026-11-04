@@ -1,3 +1,4 @@
+#include "ai_stream.h"
 #include "echo_protocol.h"
 
 #include <cassert>
@@ -7,6 +8,39 @@
 int main() {
     using namespace stubuddy;
     using namespace stubuddy::echo;
+    std::vector<int16_t> quiet_prefix(4800, 0);
+    const auto stream_levels = AiStreamLevels(quiet_prefix.data(), quiet_prefix.size());
+    assert(stream_levels.gain > 0);
+    assert(ReplaySample(10000, 1000, 4800, stream_levels, 160) > 0);
+    assert(ReplaySample(32767, 1000, 4800, stream_levels, 160) <= 983);
+    // Regression: the real CosyVoice first packet was 244 bytes, exceeding
+    // the unrelated local encoder's 227-byte capacity.
+    std::vector<uint8_t> ai_storage(2 * (kAiReplyPacketBytes + 2));
+    OpusPacketStore ai_packets(ai_storage.data(), ai_storage.size(), kAiReplyPacketBytes);
+    std::vector<uint8_t> first_packet(244, 42);
+    assert(ai_packets.Push(first_packet.data(), first_packet.size()));
+    assert(!ai_packets.Push(first_packet.data(), kAiReplyPacketBytes + 1));
+    Metadata prefix{1, 4696, 104, 5, 900, 123};
+    Metadata empty{};
+    assert(ValidAiCheckpoint(prefix, empty, false));
+    assert(!ValidAiCheckpoint(prefix, empty, true));
+    auto final = prefix;
+    final.frames = 6;
+    final.samples = 4800;
+    final.bytes = 1080;
+    assert(ValidAiCheckpoint(final, prefix, true));
+    assert(ValidAiCheckpoint(final, final, true));
+    assert(!ValidAiCheckpoint(final, final, false));
+    auto corrupt = final;
+    corrupt.samples = 4799;
+    assert(!ValidAiCheckpoint(corrupt, prefix, true));
+    corrupt = prefix;
+    corrupt.frames = 6;
+    assert(!ValidAiCheckpoint(corrupt, empty, false));
+    corrupt = final;
+    corrupt.frames = 11;
+    corrupt.samples = 10456;
+    assert(!ValidAiCheckpoint(corrupt, prefix, false));
     const uint8_t text[] = {'1', '2', '3', '4', '5', '6', '7', '8', '9'};
     assert(Crc32(0, text, 9) == 0xcbf43926U);
     assert(Crc32(Crc32(0, text, 4), text + 4, 5) == 0xcbf43926U);

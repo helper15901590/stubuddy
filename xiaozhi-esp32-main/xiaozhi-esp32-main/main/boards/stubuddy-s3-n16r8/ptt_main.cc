@@ -6,6 +6,9 @@
 #include "ptt_playback.h"
 #include "recording_pcm.h"
 #include "startup_audio.h"
+#ifdef CONFIG_STUBUDDY_AI_PTT
+#include "ai_stream.h"
+#endif
 #ifdef CONFIG_STUBUDDY_OPUS_LOOPBACK
 #include "opus_loopback.h"
 #endif
@@ -39,7 +42,9 @@ constexpr char kTag[] = "STUBUDDY_PTT";
 stubuddy::WifiSetup wifi_setup;
 #endif
 #ifdef CONFIG_STUBUDDY_WS_ECHO
-#ifdef CONFIG_STUBUDDY_WSS_ECHO
+#ifdef CONFIG_STUBUDDY_AI_PTT
+constexpr char kCheckpoint[] = "4.1 (merged ASR/LLM/TTS)";
+#elif defined(CONFIG_STUBUDDY_WSS_ECHO)
 constexpr char kCheckpoint[] = "3.6.2";
 #else
 constexpr char kCheckpoint[] = "3.6.1";
@@ -220,25 +225,44 @@ esp_err_t InterruptWaitingEcho(AudioCodec& codec, ReplayOutcome& outcome) {
     return ESP_OK;
 }
 
+#ifndef CONFIG_STUBUDDY_AI_PTT
 esp_err_t ReceiveEcho(AudioCodec& codec, int16_t* recording, size_t samples, size_t frames,
-                      stubuddy::PttButton& button, ReplayOutcome& outcome, bool& decoded) {
+                      stubuddy::PttButton& button, ReplayOutcome& outcome, bool& decoded,
+                      size_t& playback_samples) {
     decoded = false;
     if (!ws_echo.Finish(samples, opus_loopback.delay(), frames))
         return ESP_OK;  // Recoverable network failure. Never use local PCM.
     status_led.SetState(stubuddy::LedState::ModelWaiting);
     stubuddy::PlaybackInterrupt interrupt(button.pressed());
+#ifdef CONFIG_STUBUDDY_AI_PTT
+    const unsigned waiting_started = Milliseconds();
+#endif
     while (!ws_echo.done()) {
         button.Update(RawButtonPressed(), Milliseconds());
         if (interrupt.Update(button.pressed()))
             return InterruptWaitingEcho(codec, outcome);
         if (ws_echo.round_failed())
             return ESP_OK;
-        if (Milliseconds() - ws_echo.progress_at() >= stubuddy::echo::kProgressTimeoutMs) {
+        if (
+#ifdef CONFIG_STUBUDDY_AI_PTT
+            Milliseconds() - ws_echo.progress_at() >= 45000 ||
+            Milliseconds() - waiting_started >= 95000
+#else
+            Milliseconds() - ws_echo.progress_at() >= stubuddy::echo::kProgressTimeoutMs
+#endif
+        ) {
             ws_echo.Timeout();
             return ESP_OK;
         }
         vTaskDelay(pdMS_TO_TICKS(10));
     }
+#ifdef CONFIG_STUBUDDY_AI_PTT
+    if (ws_echo.round_empty())
+        return ESP_OK;
+    playback_samples = ws_echo.reply_samples();
+#else
+    playback_samples = samples;
+#endif
     struct DecodeContext {
         stubuddy::PttButton& button;
         stubuddy::PlaybackInterrupt& interrupt;
@@ -250,11 +274,128 @@ esp_err_t ReceiveEcho(AudioCodec& codec, int16_t* recording, size_t samples, siz
         state.cancelled = state.interrupt.Update(state.button.pressed());
         return !state.cancelled;
     };
+#ifdef CONFIG_STUBUDDY_AI_PTT
+    const esp_err_t result = opus_loopback.DecodeReply(recording, playback_samples,
+                                                       ws_echo.reply_delay(), proceed, &context);
+#else
     const esp_err_t result = opus_loopback.DecodeEcho(recording, samples, proceed, &context);
+#endif
     if (context.cancelled)
         return InterruptWaitingEcho(codec, outcome);
     ESP_RETURN_ON_ERROR(result, kTag, "Returned Opus decode failed");
     decoded = true;
+    return ESP_OK;
+}
+#endif
+#endif
+
+#ifdef CONFIG_STUBUDDY_AI_PTT
+esp_err_t StreamReply(AudioCodec& codec, int16_t* pcm, size_t samples, stubuddy::PttButton& button,
+                      std::vector<int16_t>& block, ReplayOutcome& outcome, size_t& dirty_samples) {
+    if (!ws_echo.Finish(samples, opus_loopback.delay(), opus_loopback.frames()))
+        return ESP_OK;
+    status_led.SetState(stubuddy::LedState::ModelWaiting);
+    ESP_RETURN_ON_ERROR(opus_loopback.StartStreamDecode(), kTag, "Stream decoder reset failed");
+    stubuddy::PlaybackInterrupt interrupt(button.pressed());
+    std::array<uint8_t, stubuddy::kAiReplyPacketBytes> packet{};
+    size_t cursor = 0, index = 0, decoded = 0, played = 0;
+    stubuddy::echo::Metadata verified;
+    const unsigned started = Milliseconds();
+    bool playing = false, ever_played = false;
+    bool finished = false;
+    stubuddy::RecordingLevels levels;
+    while (true) {
+        button.Update(RawButtonPressed(), Milliseconds());
+        if (interrupt.Update(button.pressed())) {
+            codec.AbortOutput();
+            ESP_RETURN_ON_FALSE(!codec.HasOutputError(), ESP_FAIL, kTag, "Stream abort failed");
+            ESP_LOGI(kTag, "AI STREAM INTERRUPTED: old audio/DMA discarded");
+            return InterruptWaitingEcho(codec, outcome);
+        }
+        // Preserve accepted disconnect behavior: a fully verified cached
+        // response can finish offline. Incomplete streams fail immediately.
+        if (ws_echo.stream_failed())
+            break;
+        if (ws_echo.round_empty()) {
+            status_led.SetState(stubuddy::LedState::Idle);
+            return ESP_OK;
+        }
+        if ((!ws_echo.done() && Milliseconds() - ws_echo.progress_at() >= 45000) ||
+            (!ever_played && Milliseconds() - started >= 95000) ||
+            Milliseconds() - started >= 155000) {
+            ws_echo.Timeout();
+            break;
+        }
+        // Decode just ahead of the speaker. Incoming Opus is bounded in PSRAM;
+        // its receive task never waits for the speaker or does codec work.
+        while (decoded - played < stubuddy::kAiPrebufferSamples) {
+            size_t size = 0;
+            if (!ws_echo.ReadStreamPacket(cursor, index, packet.data(), size, verified, finished))
+                break;
+            size_t copied = 0;
+            const auto result = opus_loopback.DecodeStreamPacket(
+                {packet.data(), size}, index, verified.delay, verified.samples, pcm, copied);
+            if (result != ESP_OK) {
+                codec.AbortOutput();
+                ws_echo.Timeout();
+                status_led.SetState(stubuddy::LedState::Idle);
+                return ESP_OK;  // Recoverable round failure, no permanent PTT stop.
+            }
+            ++index;
+            decoded += copied;
+            dirty_samples = std::max(dirty_samples, decoded);
+        }
+        if (ws_echo.stream_failed())
+            break;
+        if (finished && index == verified.frames && decoded == played) {
+            if (decoded != verified.samples) {
+                ws_echo.Timeout();
+                break;
+            }
+            codec.EnableOutput(false);  // Drain final DMA before acknowledging history.
+            status_led.SetPhase(stubuddy::PttLedPhase::ReleaseGate);
+            ESP_RETURN_ON_FALSE(!codec.HasOutputError(), ESP_FAIL, kTag, "Stream shutdown failed");
+            ws_echo.PlaybackDone();
+            ESP_LOGI(kTag, "AI STREAM DONE: samples=%u frames=%u; amplifier OFF; LED OFF; errors=0",
+                     unsigned(played), unsigned(index));
+            return ESP_OK;
+        }
+        const size_t available = decoded - played;
+        if (!playing && (available >= 4000 || (finished && available))) {
+            if (!ever_played) {
+                levels = stubuddy::AiStreamLevels(pcm, decoded);
+            }
+            codec.EnableOutput(true);
+            ESP_RETURN_ON_FALSE(codec.output_enabled() && !codec.HasOutputError(), ESP_FAIL, kTag,
+                                "Cannot start streaming output");
+            status_led.SetPhase(stubuddy::PttLedPhase::Playback);
+            ESP_LOGI(kTag, "AI STREAM %s: first_voice_ms=%u buffered=%u; LED ON",
+                     ever_played ? "RESUME" : "START", Milliseconds() - started,
+                     unsigned(available));
+            playing = ever_played = true;
+        }
+        if (playing && available) {
+            const size_t count = std::min(available, stubuddy::kFramesPerBlock);
+            block.resize(count);
+            for (size_t i = 0; i < count; ++i)
+                block[i] = stubuddy::ReplaySample(pcm[played + i], played + i,
+                                                  finished ? verified.samples : kMaxSamples, levels,
+                                                  stubuddy::kSampleRate / 100);
+            codec.OutputData(block);
+            ESP_RETURN_ON_FALSE(!codec.HasOutputError(), ESP_FAIL, kTag, "Streaming output failed");
+            played += count;
+        } else if (playing) {
+            codec.EnableOutput(false);
+            status_led.SetState(stubuddy::LedState::ModelWaiting);
+            playing = false;
+            ESP_LOGW(kTag, "AI STREAM BUFFERING: waiting for verified audio; LED BREATH");
+        } else {
+            vTaskDelay(pdMS_TO_TICKS(10));
+        }
+    }
+    codec.AbortOutput();
+    status_led.SetPhase(stubuddy::PttLedPhase::ReleaseGate);
+    ESP_LOGW(kTag, "AI STREAM FAILED: partial reply discarded; history not committed");
     return ESP_OK;
 }
 #endif
@@ -467,20 +608,37 @@ esp_err_t RunPtt(AudioCodec& codec) {
 #ifdef CONFIG_STUBUDDY_WS_ECHO
             ESP_RETURN_ON_ERROR(opus_loopback.FinishCapture(count), kTag,
                                 "Remote encode finish failed");
+#ifdef CONFIG_STUBUDDY_AI_PTT
+            ESP_RETURN_ON_ERROR(
+                StreamReply(codec, recording.get(), count, button, block, outcome, dirty_samples),
+                kTag, "AI stream failed");
+#else
             bool decoded = false;
+            size_t playback_samples = count;
             ESP_RETURN_ON_ERROR(ReceiveEcho(codec, recording.get(), count, opus_loopback.frames(),
-                                            button, outcome, decoded),
+                                            button, outcome, decoded, playback_samples),
                                 kTag, "Echo receive failed");
+            dirty_samples = std::max(dirty_samples, playback_samples);
             if (decoded) {
                 ESP_RETURN_ON_ERROR(
-                    Replay(codec, recording.get(), count, block, round, button, outcome), kTag,
-                    "Remote replay failed");
+                    Replay(codec, recording.get(), playback_samples, block, round, button, outcome),
+                    kTag, "Remote replay failed");
+#ifdef CONFIG_STUBUDDY_AI_PTT
+                if (outcome == ReplayOutcome::Finished)
+                    ws_echo.PlaybackDone();
+#endif
             } else if (outcome == ReplayOutcome::Finished) {
-                ESP_LOGW(kTag,
-                         "ROUND FAILED: %u; no server echo played; reconnect before next round",
-                         round);
+#ifdef CONFIG_STUBUDDY_AI_PTT
+                if (ws_echo.round_empty())
+                    ESP_LOGI(kTag, "AI ROUND EMPTY: %u; LED OFF", round);
+                else
+#endif
+                    ESP_LOGW(kTag,
+                             "ROUND FAILED: %u; no server echo played; reconnect before next round",
+                             round);
                 status_led.SetPhase(stubuddy::PttLedPhase::ReleaseGate);
             }
+#endif
 #elif defined(CONFIG_STUBUDDY_OPUS_LOOPBACK)
             ESP_RETURN_ON_ERROR(opus_loopback.FinishAndDecode(recording.get(), count), kTag,
                                 "Opus decode failed; raw PCM is never replayed as a fallback");

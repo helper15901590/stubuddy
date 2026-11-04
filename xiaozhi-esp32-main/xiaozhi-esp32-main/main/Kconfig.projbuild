@@ -54,6 +54,14 @@ config STUBUDDY_WSS_ECHO
         Require TLS certificate bundle, peer identity and validity verification.
         Synchronize time before connecting. Use configure_cloud.py for this profile.
 
+config STUBUDDY_AI_PTT
+    bool "Enable stubuddy DashScope PTT voice assistant (checkpoint 4.1)"
+    depends on STUBUDDY_WSS_ECHO
+    default n
+    help
+        Negotiated ai/1 sessions over the verified WSS transport. ASR/LLM/TTS
+        execute on the private server. The earlier echo/1 profiles remain independent.
+
 config OTA_URL
     string "Default OTA URL"
     default "https://api.tenclass.net/xiaozhi/ota/"

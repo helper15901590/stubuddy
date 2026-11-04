@@ -1,7 +1,16 @@
 #include "ws_echo.h"
+#ifdef CONFIG_STUBUDDY_AI_PTT
+#include "ai_stream.h"
+#endif
 
 #ifdef CONFIG_STUBUDDY_WSS_ECHO
-#if __has_include("stubuddy_echo_cloud.h")
+#ifdef CONFIG_STUBUDDY_AI_PTT
+#if __has_include("stubuddy_ai_private.h")
+#include "stubuddy_ai_private.h"
+#else
+#error "Run stubuddy/server/voice-ai/configure.py before building ai-ptt"
+#endif
+#elif __has_include("stubuddy_echo_cloud.h")
 #include "stubuddy_echo_cloud.h"
 #else
 #error "Run python stubuddy/server/ws-echo/configure_cloud.py --server-ip PUBLIC_IP first"
@@ -33,7 +42,9 @@
 #include <string>
 
 namespace stubuddy {
-#ifdef CONFIG_STUBUDDY_WSS_ECHO
+#ifdef CONFIG_STUBUDDY_AI_PTT
+namespace echo_settings = ai_private;
+#elif defined(CONFIG_STUBUDDY_WSS_ECHO)
 namespace echo_settings = echo_cloud;
 #else
 namespace echo_settings = echo_local;
@@ -107,8 +118,13 @@ esp_err_t WsEcho::Start(WifiSetup& wifi, OpusPacketStore& received, size_t packe
                         kTag, "Cannot register WS events");
     ESP_RETURN_ON_FALSE(xTaskCreate(WorkerEntry, "stubuddy_ws", 8192, this, 3, nullptr) == pdPASS,
                         ESP_ERR_NO_MEM, kTag, "Cannot create echo worker");
+#ifdef CONFIG_STUBUDDY_AI_PTT
+    ESP_LOGI(kTag, "%s AI: %s; token not logged; queue=%u frames/%u PSRAM bytes", kTransport,
+             echo_settings::kUrl, kQueueDepth, unsigned(kQueueDepth * sizeof(Command)));
+#else
     ESP_LOGI(kTag, "%s ECHO: %s; token not logged; queue=%u frames/%u PSRAM bytes", kTransport,
              echo_settings::kUrl, kQueueDepth, unsigned(kQueueDepth * sizeof(Command)));
+#endif
     return ESP_OK;
 }
 
@@ -117,9 +133,10 @@ bool WsEcho::ready() const {
            wifi_epoch_.load() == wifi_->link_epoch() && Now() - last_rx_.load() < 20000;
 }
 
-void WsEcho::Fault() {
+void WsEcho::Fault(const char* reason) {
     ready_.store(false);
-    round_failed_.store(true);
+    if (!round_failed_.exchange(true))
+        ESP_LOGW(kTag, "RX/TRANSPORT REJECT: turn=%u reason=%s", active_turn_.load(), reason);
     close_requested_.store(true);
     if (wifi_ && wifi_->online() && !fault_latched_.exchange(true))
         fault_notice_.store(true);
@@ -140,6 +157,9 @@ bool WsEcho::Enqueue(const Command& command) {
 
 bool WsEcho::Begin(unsigned turn) {
     Cancel();
+#ifdef CONFIG_STUBUDDY_AI_PTT
+    empty_.store(false);
+#endif
     uploaded_ = {};
     uploaded_.turn = turn;
     if (!ready() || !turn) {
@@ -227,6 +247,32 @@ void WsEcho::Cancel() {
     }
 }
 
+#ifdef CONFIG_STUBUDDY_AI_PTT
+bool WsEcho::ReadStreamPacket(size_t& cursor, size_t index, uint8_t* packet, size_t& size,
+                              echo::Metadata& verified, bool& complete) {
+    xSemaphoreTake(rx_mutex_, portMAX_DELAY);
+    verified = expected_;
+    complete = done();  // End flag and final trim belong to the same snapshot.
+    OpusPacketView view;
+    const bool available =
+        !stream_failed() && index < verified.frames && received_->Next(cursor, view);
+    size = available ? view.size : 0;
+    if (available)
+        std::memcpy(packet, view.data, view.size);
+    xSemaphoreGive(rx_mutex_);
+    return available;
+}
+
+void WsEcho::PlaybackDone() {
+    Command command;
+    command.kind = Kind::Played;
+    command.turn = active_turn_.load();
+    command.epoch = epoch();
+    if (command.turn)
+        Enqueue(command);
+}
+#endif
+
 bool WsEcho::ReadMetadata(const cJSON* root, echo::Metadata& m) {
     return UInt(root, "turn", m.turn) && UInt(root, "samples", m.samples) &&
            UInt(root, "delay", m.delay) && UInt(root, "frames", m.frames) &&
@@ -242,10 +288,23 @@ void WsEcho::OnMessage(unsigned opcode, const uint8_t* data, size_t size) {
         }
         if (audio.turn != active_turn_.load() || done_.load() || round_failed_.load())
             return;
-        if (!accepting_ || audio.sequence != received_frames_ ||
-            received_frames_ >= expected_.frames || audio.size > packet_limit_ ||
-            !received_->Push(audio.data, audio.size)) {
-            Fault();
+        const size_t receive_limit =
+#ifdef CONFIG_STUBUDDY_AI_PTT
+            kAiReplyPacketBytes;
+#else
+            packet_limit_;
+#endif
+        const unsigned frame_limit =
+#ifdef CONFIG_STUBUDDY_AI_PTT
+            kOpusMaxPackets;
+#else
+            expected_.frames;
+#endif
+        if (!accepting_ || audio.sequence != received_frames_ || received_frames_ >= frame_limit ||
+            audio.size > receive_limit || !received_->Push(audio.data, audio.size)) {
+            ESP_LOGW(kTag, "AUDIO REJECT: seq=%u expected=%u size=%u limit=%u", audio.sequence,
+                     received_frames_, unsigned(audio.size), unsigned(receive_limit));
+            Fault("audio_sequence_size_or_storage");
             return;
         }
         ++received_frames_;
@@ -277,16 +336,44 @@ void WsEcho::OnMessage(unsigned opcode, const uint8_t* data, size_t size) {
         }
         uint32_t protocol = 0, rate = 0, channels = 0, duration = 0;
         const cJSON* audio = cJSON_GetObjectItemCaseSensitive(root, "audio_params");
-        if (Text(root, "transport", "websocket") && UInt(root, "echo_protocol", protocol) &&
+        if (Text(root, "transport", "websocket") &&
+#ifdef CONFIG_STUBUDDY_AI_PTT
+            UInt(root, "ai_protocol", protocol) &&
+#else
+            UInt(root, "echo_protocol", protocol) &&
+#endif
             protocol == 1 && Text(audio, "format", "opus") && UInt(audio, "sample_rate", rate) &&
             rate == 16000 && UInt(audio, "channels", channels) && channels == 1 &&
             UInt(audio, "frame_duration", duration) && duration == 60 && wifi_->online()) {
+#ifdef CONFIG_STUBUDDY_AI_PTT
+            uint32_t stream = 0, packet_limit = 0;
+            if (!UInt(root, "reply_stream", stream) || stream != 1 ||
+                !UInt(root, "max_reply_packet_bytes", packet_limit) ||
+                packet_limit != kAiReplyPacketBytes) {
+                cJSON_Delete(root);
+                Fault("server_missing_stream_support_update_server_first");
+                return;
+            }
+            const cJSON* session = cJSON_GetObjectItemCaseSensitive(root, "session_id");
+            if (!cJSON_IsString(session) || std::strlen(session->valuestring) != 16) {
+                cJSON_Delete(root);
+                Fault();
+                return;
+            }
+            std::snprintf(session_id_.data(), session_id_.size(), "%s", session->valuestring);
+#endif
             wifi_epoch_.store(wifi_->link_epoch());
             last_rx_.store(Now());
             ready_.store(true);
             failures_.store(0);
             fault_latched_.store(false);
+#ifdef CONFIG_STUBUDDY_AI_PTT
+            ESP_LOGI(kTag,
+                     "AI READY: authenticated ai/1; reply_stream=1 packet_limit=1275; epoch=%u",
+                     epoch());
+#else
             ESP_LOGI(kTag, "WS READY: authenticated echo/1; 16000Hz mono/60ms; epoch=%u", epoch());
+#endif
         } else
             Fault();
     } else if (Text(root, "type", "pong")) {
@@ -302,6 +389,96 @@ void WsEcho::OnMessage(unsigned opcode, const uint8_t* data, size_t size) {
             cJSON_Delete(root);
             return;
         }
+#ifdef CONFIG_STUBUDDY_AI_PTT
+        if (!Text(root, "session_id", session_id_.data())) {
+            cJSON_Delete(root);
+            Fault();
+            return;
+        }
+        if (Text(root, "type", "stage")) {
+            if (!Text(root, "state", "asr") && !Text(root, "state", "llm") &&
+                !Text(root, "state", "tts")) {
+                cJSON_Delete(root);
+                Fault();
+                return;
+            }
+            progress_at_.store(Now());
+            last_rx_.store(Now());
+            ESP_LOGI(kTag, "AI WAIT: turn=%u; stage=%s", turn,
+                     cJSON_GetObjectItemCaseSensitive(root, "state")->valuestring);
+            cJSON_Delete(root);
+            return;
+        }
+        if (Text(root, "type", "stt") || Text(root, "type", "reply_text")) {
+            const cJSON* text = cJSON_GetObjectItemCaseSensitive(root, "text");
+            if (!cJSON_IsString(text) || std::strlen(text->valuestring) > 750) {
+                cJSON_Delete(root);
+                Fault();
+                return;
+            }
+            ESP_LOGI(kTag, "AI %s: turn=%u; %s", Text(root, "type", "stt") ? "STT" : "TEXT", turn,
+                     text->valuestring);
+            progress_at_.store(Now());
+            last_rx_.store(Now());
+            cJSON_Delete(root);
+            return;
+        }
+        if (Text(root, "type", "turn_empty")) {
+            empty_.store(true);
+            done_.store(true, std::memory_order_release);
+            ESP_LOGI(kTag, "AI EMPTY: turn=%u; no speech recognized", turn);
+            cJSON_Delete(root);
+            return;
+        }
+        if (Text(root, "type", "turn_error")) {
+            round_failed_.store(true);
+            fault_notice_.store(true);
+            ESP_LOGW(kTag, "AI TURN FAILED: turn=%u; retry with a fresh press", turn);
+            cJSON_Delete(root);
+            return;
+        }
+        if (Text(root, "type", "reply_start") && !accepting_) {
+            uint32_t stream = 0, delay = 0, limit = 0;
+            if (!UInt(root, "stream", stream) || stream != 1 || !UInt(root, "delay", delay) ||
+                delay >= kOpusFrameSamples || !UInt(root, "max_packet_bytes", limit) ||
+                limit != kAiReplyPacketBytes) {
+                cJSON_Delete(root);
+                Fault("invalid_stream_start");
+                return;
+            }
+            expected_ = {};
+            expected_.turn = turn;
+            expected_.delay = delay;
+            received_->Reset();
+            received_frames_ = received_bytes_ = received_crc_ = 0;
+            accepting_ = true;
+            progress_at_.store(Now());
+            last_rx_.store(Now());
+            cJSON_Delete(root);
+            return;
+        }
+        echo::Metadata metadata;
+        const bool final = Text(root, "type", "reply_end");
+        if ((!final && !Text(root, "type", "reply_chunk")) || !accepting_ ||
+            !UInt(root, "turn", metadata.turn) || !UInt(root, "samples", metadata.samples) ||
+            !UInt(root, "delay", metadata.delay) || !UInt(root, "frames", metadata.frames) ||
+            !UInt(root, "bytes", metadata.bytes) || !UInt(root, "crc32", metadata.crc32) ||
+            metadata.delay != expected_.delay || !ValidAiCheckpoint(metadata, expected_, final) ||
+            metadata.frames != received_frames_ || metadata.bytes != received_bytes_ ||
+            metadata.crc32 != received_crc_) {
+            cJSON_Delete(root);
+            Fault("stream_checkpoint_sequence_samples_or_crc");
+            return;
+        }
+        expected_ = metadata;
+        progress_at_.store(Now());
+        if (final) {
+            accepting_ = false;
+            ESP_LOGI(kTag, "AI VERIFIED: turn=%u; frames=%u; samples=%u; crc32=%08x", turn,
+                     received_frames_, expected_.samples, received_crc_);
+            done_.store(true, std::memory_order_release);
+        }
+#else
         echo::Metadata metadata;
         if (!ReadMetadata(root, metadata) || !(metadata == expected_)) {
             cJSON_Delete(root);
@@ -323,6 +500,7 @@ void WsEcho::OnMessage(unsigned opcode, const uint8_t* data, size_t size) {
             done_.store(true, std::memory_order_release);
         } else
             Fault();
+#endif
         last_rx_.store(Now());
     }
     cJSON_Delete(root);
@@ -421,8 +599,13 @@ void WsEcho::Worker() {
     while (true) {
         if (hello_needed_.exchange(false)) {
             close_requested_.store(false);
+#ifdef CONFIG_STUBUDDY_AI_PTT
+            SendText(
+                R"({"type":"hello","version":1,"transport":"websocket","ai_protocol":1,"reply_stream":1,"max_reply_packet_bytes":1275,"audio_params":{"format":"opus","sample_rate":16000,"channels":1,"frame_duration":60}})");
+#else
             SendText(
                 R"({"type":"hello","version":1,"transport":"websocket","echo_protocol":1,"audio_params":{"format":"opus","sample_rate":16000,"channels":1,"frame_duration":60}})");
+#endif
         }
         if (connected_.load() &&
             ((ready_.load() && !ready()) || (!ready_.load() && Now() - last_rx_.load() > 10000)))
@@ -438,7 +621,8 @@ void WsEcho::Worker() {
         if (xQueueReceive(outgoing_, &sending_, pdMS_TO_TICKS(20)) != pdTRUE)
             continue;
         if (!ready() || sending_.epoch != epoch() ||
-            (sending_.kind != Kind::Abort && sending_.turn != active_turn_.load()))
+            (sending_.kind != Kind::Abort && sending_.kind != Kind::Played &&
+             sending_.turn != active_turn_.load()))
             continue;
         char text[384];
         if (sending_.kind == Kind::Audio) {
@@ -462,6 +646,10 @@ void WsEcho::Worker() {
                           "\"delay\":%u,\"frames\":%u,\"bytes\":%u,\"crc32\":%u}",
                           unsigned(m.turn), unsigned(m.samples), unsigned(m.delay),
                           unsigned(m.frames), unsigned(m.bytes), unsigned(m.crc32));
+            SendText(text);
+        } else if (sending_.kind == Kind::Played) {
+            std::snprintf(text, sizeof(text), "{\"type\":\"playback_done\",\"turn\":%u}",
+                          sending_.turn);
             SendText(text);
         } else {
             std::snprintf(text, sizeof(text), "{\"type\":\"abort\",\"turn\":%u}", sending_.turn);

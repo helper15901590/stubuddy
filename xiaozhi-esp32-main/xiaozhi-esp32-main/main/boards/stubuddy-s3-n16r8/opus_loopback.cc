@@ -1,4 +1,7 @@
 #include "opus_loopback.h"
+#ifdef CONFIG_STUBUDDY_AI_PTT
+#include "ai_stream.h"
+#endif
 
 #include <esp_check.h>
 #include <esp_heap_caps.h>
@@ -62,14 +65,20 @@ esp_err_t OpusLoopback::Initialize() {
                         ESP_ERR_INVALID_SIZE, kTag, "Unexpected frame sizes: in=%d out=%d",
                         input_bytes, output_bytes);
     packet_capacity_ = size_t(output_bytes);
-    const size_t capacity = kOpusMaxPackets * (packet_capacity_ + 2);
+    const size_t store_packet_limit =
+#ifdef CONFIG_STUBUDDY_AI_PTT
+        kAiReplyPacketBytes;
+#else
+        packet_capacity_;
+#endif
+    const size_t capacity = kOpusMaxPackets * (store_packet_limit + 2);
     storage_ =
         static_cast<uint8_t*>(heap_caps_malloc(capacity, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
     packet_ = static_cast<uint8_t*>(
         heap_caps_malloc(packet_capacity_, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
     ESP_RETURN_ON_FALSE(storage_ && packet_, ESP_ERR_NO_MEM, kTag,
                         "Cannot allocate bounded packet storage: %u bytes", unsigned(capacity));
-    packets_.reset(new (std::nothrow) OpusPacketStore(storage_, capacity, packet_capacity_));
+    packets_.reset(new (std::nothrow) OpusPacketStore(storage_, capacity, store_packet_limit));
     ESP_RETURN_ON_FALSE(packets_ != nullptr, ESP_ERR_NO_MEM, kTag, "Packet store unavailable");
     esp_opus_dec_cfg_t decoder = {};
     decoder.sample_rate = 16000;
@@ -84,6 +93,10 @@ esp_err_t OpusLoopback::Initialize() {
         "CONFIG: 16000Hz mono PCM16; frame=60ms/960 samples; AUDIO complexity=0; VBR=ON DTX=OFF");
     ESP_LOGI(kTag, "STORAGE: max_packets=%u; packet_limit=%u; PSRAM=%u bytes; allocated once",
              unsigned(kOpusMaxPackets), unsigned(packet_capacity_), unsigned(capacity));
+#ifdef CONFIG_STUBUDDY_AI_PTT
+    ESP_LOGI(kTag, "AI DOWNLINK: packet_limit=%u; independent of uplink capacity",
+             unsigned(store_packet_limit));
+#endif
     ESP_RETURN_ON_ERROR(MeasureDelay(), kTag, "Silent codec self-test failed");
     Erase();
     return ESP_OK;
@@ -323,5 +336,45 @@ esp_err_t OpusLoopback::DecodeEcho(int16_t* pcm, size_t samples, bool (*proceed)
              unsigned(copied), errors_, decode_max_us_);
     return ESP_OK;
 }
+#ifdef CONFIG_STUBUDDY_AI_PTT
+esp_err_t OpusLoopback::StartStreamDecode() {
+    return Check(esp_opus_dec_reset(decoder_), "reset streaming TTS decoder");
+}
+
+esp_err_t OpusLoopback::DecodeStreamPacket(OpusPacketView packet, size_t index, size_t delay,
+                                           size_t samples, int16_t* pcm, size_t& copied) {
+    ESP_RETURN_ON_ERROR(DecodePacket(packet), kTag, "Streaming TTS decode failed");
+    copied = CopyOpusPcm(decoded_.data(), decoded_.size(), index * kOpusFrameSamples, delay,
+                         samples, pcm, kOpusMaxSamples);
+    return ESP_OK;
+}
+
+esp_err_t OpusLoopback::DecodeReply(int16_t* pcm, size_t samples, size_t delay,
+                                    bool (*proceed)(void*), void* context) {
+    ESP_RETURN_ON_FALSE(!capturing_ && pcm && samples && samples <= kOpusMaxSamples &&
+                            delay < kOpusFrameSamples &&
+                            packets_->count() == OpusPacketsNeeded(samples, delay),
+                        ESP_ERR_INVALID_STATE, kTag, "Invalid independent TTS audio");
+    ESP_RETURN_ON_ERROR(Check(esp_opus_dec_reset(decoder_), "reset TTS decoder"), kTag,
+                        "TTS decoder reset failed");
+    size_t cursor = 0, copied = 0;
+    for (size_t index = 0; index < packets_->count(); ++index) {
+        if (proceed && !proceed(context))
+            return ESP_ERR_INVALID_STATE;
+        OpusPacketView packet;
+        ESP_RETURN_ON_FALSE(packets_->Next(cursor, packet), ESP_FAIL, kTag, "Bad TTS packet");
+        ESP_RETURN_ON_ERROR(DecodePacket(packet), kTag, "TTS decode failed");
+        copied += CopyOpusPcm(decoded_.data(), decoded_.size(), index * kOpusFrameSamples, delay,
+                              samples, pcm, kOpusMaxSamples);
+        if (index % 16 == 15)
+            vTaskDelay(1);
+    }
+    ESP_RETURN_ON_FALSE(copied == samples && cursor == packets_->used(), ESP_ERR_INVALID_SIZE, kTag,
+                        "TTS sample count mismatch");
+    ESP_LOGI(kTag, "AI DECODE: samples=%u; delay=%u; errors=%u", unsigned(copied), unsigned(delay),
+             errors_);
+    return ESP_OK;
+}
+#endif
 #endif
 }  // namespace stubuddy

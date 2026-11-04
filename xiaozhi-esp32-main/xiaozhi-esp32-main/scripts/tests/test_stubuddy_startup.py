@@ -43,7 +43,7 @@ class StubuddyStartupTests(unittest.TestCase):
         cfg = json.loads((BOARD / "config.json").read_text(encoding="utf-8"))
         for variant in cfg["builds"]:
             led = variant["name"] in ("stubuddy-s3-n16r8-ptt-led", "stubuddy-s3-n16r8-wifi-ptt",
-                                      "stubuddy-s3-n16r8-wifi-opus-ptt", "stubuddy-s3-n16r8-ws-echo", "stubuddy-s3-n16r8-wss-echo")
+                                      "stubuddy-s3-n16r8-wifi-opus-ptt", "stubuddy-s3-n16r8-ws-echo", "stubuddy-s3-n16r8-wss-echo", "stubuddy-s3-n16r8-ai-ptt")
             self.assertIn(f"CONFIG_STUBUDDY_STATUS_LED={'y' if led else 'n'}",
                           variant["sdkconfig_append"])
             if led:
@@ -55,7 +55,7 @@ class StubuddyStartupTests(unittest.TestCase):
         cfg = json.loads((BOARD / "config.json").read_text(encoding="utf-8"))
         for variant in cfg["builds"]:
             wifi = variant["name"] in ("stubuddy-s3-n16r8-wifi-ptt",
-                                       "stubuddy-s3-n16r8-wifi-opus-ptt", "stubuddy-s3-n16r8-ws-echo", "stubuddy-s3-n16r8-wss-echo")
+                                       "stubuddy-s3-n16r8-wifi-opus-ptt", "stubuddy-s3-n16r8-ws-echo", "stubuddy-s3-n16r8-wss-echo", "stubuddy-s3-n16r8-ai-ptt")
             self.assertIn(f"CONFIG_STUBUDDY_SOFTAP_SETUP={'y' if wifi else 'n'}",
                           variant["sdkconfig_append"])
             if wifi:
@@ -67,7 +67,7 @@ class StubuddyStartupTests(unittest.TestCase):
         self.assertEqual(sum(v["name"] == "stubuddy-s3-n16r8-wifi-opus-ptt" for v in variants), 1)
         cfg = json.loads((BOARD / "config.json").read_text(encoding="utf-8"))
         for variant in cfg["builds"]:
-            opus = variant["name"] in ("stubuddy-s3-n16r8-wifi-opus-ptt", "stubuddy-s3-n16r8-ws-echo", "stubuddy-s3-n16r8-wss-echo")
+            opus = variant["name"] in ("stubuddy-s3-n16r8-wifi-opus-ptt", "stubuddy-s3-n16r8-ws-echo", "stubuddy-s3-n16r8-wss-echo", "stubuddy-s3-n16r8-ai-ptt")
             self.assertIn(f"CONFIG_STUBUDDY_OPUS_LOOPBACK={'y' if opus else 'n'}",
                           variant["sdkconfig_append"])
             self.assertEqual("main/boards/stubuddy-s3-n16r8/opus.defaults" in
@@ -78,7 +78,7 @@ class StubuddyStartupTests(unittest.TestCase):
         self.assertEqual(sum(v["name"] == "stubuddy-s3-n16r8-ws-echo" for v in variants), 1)
         cfg = json.loads((BOARD / "config.json").read_text(encoding="utf-8"))
         for variant in cfg["builds"]:
-            websocket = variant["name"] in ("stubuddy-s3-n16r8-ws-echo", "stubuddy-s3-n16r8-wss-echo")
+            websocket = variant["name"] in ("stubuddy-s3-n16r8-ws-echo", "stubuddy-s3-n16r8-wss-echo", "stubuddy-s3-n16r8-ai-ptt")
             self.assertIn(f"CONFIG_STUBUDDY_WS_ECHO={'y' if websocket else 'n'}",
                           variant["sdkconfig_append"])
             self.assertEqual("main/boards/stubuddy-s3-n16r8/ws_echo.defaults" in
@@ -88,7 +88,7 @@ class StubuddyStartupTests(unittest.TestCase):
         cfg = json.loads((BOARD / "config.json").read_text(encoding="utf-8"))
         self.assertEqual(sum(v["name"] == "stubuddy-s3-n16r8-wss-echo" for v in cfg["builds"]), 1)
         for variant in cfg["builds"]:
-            secure = variant["name"] == "stubuddy-s3-n16r8-wss-echo"
+            secure = variant["name"] in ("stubuddy-s3-n16r8-wss-echo", "stubuddy-s3-n16r8-ai-ptt")
             self.assertIn(f"CONFIG_STUBUDDY_WSS_ECHO={'y' if secure else 'n'}", variant["sdkconfig_append"])
             self.assertEqual("main/boards/stubuddy-s3-n16r8/wss_echo.defaults" in variant["sdkconfig_defaults"], secure)
         defaults = (BOARD / "wss_echo.defaults").read_text()

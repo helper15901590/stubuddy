@@ -29,6 +29,13 @@ public:
     }
     esp_err_t FinishCapture(size_t samples);
     esp_err_t DecodeEcho(int16_t* pcm, size_t samples, bool (*proceed)(void*), void* context);
+#ifdef CONFIG_STUBUDDY_AI_PTT
+    esp_err_t DecodeReply(int16_t* pcm, size_t samples, size_t delay, bool (*proceed)(void*),
+                          void* context);
+    esp_err_t StartStreamDecode();
+    esp_err_t DecodeStreamPacket(OpusPacketView packet, size_t index, size_t delay, size_t samples,
+                                 int16_t* pcm, size_t& copied);
+#endif
     OpusPacketStore& echo_store() { return *packets_; }
     size_t packet_limit() const { return packet_capacity_; }
     size_t delay() const { return delay_; }

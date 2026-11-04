@@ -23,7 +23,8 @@ if(_variant STREQUAL "stubuddy-s3-n16r8-ptt" OR
    _variant STREQUAL "stubuddy-s3-n16r8-wifi-ptt" OR
    _variant STREQUAL "stubuddy-s3-n16r8-wifi-opus-ptt" OR
    _variant STREQUAL "stubuddy-s3-n16r8-ws-echo" OR
-   _variant STREQUAL "stubuddy-s3-n16r8-wss-echo")
+   _variant STREQUAL "stubuddy-s3-n16r8-wss-echo" OR
+   _variant STREQUAL "stubuddy-s3-n16r8-ai-ptt")
     set(_entry "ptt_main.cc")
     set(_ptt_variant ON)
 endif()
@@ -31,7 +32,8 @@ if(_variant STREQUAL "stubuddy-s3-n16r8-ptt-led" OR
    _variant STREQUAL "stubuddy-s3-n16r8-wifi-ptt" OR
    _variant STREQUAL "stubuddy-s3-n16r8-wifi-opus-ptt" OR
    _variant STREQUAL "stubuddy-s3-n16r8-ws-echo" OR
-   _variant STREQUAL "stubuddy-s3-n16r8-wss-echo")
+   _variant STREQUAL "stubuddy-s3-n16r8-wss-echo" OR
+   _variant STREQUAL "stubuddy-s3-n16r8-ai-ptt")
     set(_led_variant ON)
     set(_led_sources "${COMPONENT_DIR}/boards/stubuddy-s3-n16r8/status_led.cc")
     set(_led_requires esp_driver_ledc)
@@ -39,7 +41,8 @@ endif()
 if(_variant STREQUAL "stubuddy-s3-n16r8-wifi-ptt" OR
    _variant STREQUAL "stubuddy-s3-n16r8-wifi-opus-ptt" OR
    _variant STREQUAL "stubuddy-s3-n16r8-ws-echo" OR
-   _variant STREQUAL "stubuddy-s3-n16r8-wss-echo")
+   _variant STREQUAL "stubuddy-s3-n16r8-wss-echo" OR
+   _variant STREQUAL "stubuddy-s3-n16r8-ai-ptt")
     set(_wifi_variant ON)
     set(_wifi_sources "${COMPONENT_DIR}/boards/stubuddy-s3-n16r8/wifi_setup.cc"
                       "${COMPONENT_DIR}/boards/stubuddy-s3-n16r8/captive_dns.cc"
@@ -49,18 +52,21 @@ if(_variant STREQUAL "stubuddy-s3-n16r8-wifi-ptt" OR
 endif()
 if(_variant STREQUAL "stubuddy-s3-n16r8-wifi-opus-ptt" OR
    _variant STREQUAL "stubuddy-s3-n16r8-ws-echo" OR
-   _variant STREQUAL "stubuddy-s3-n16r8-wss-echo")
+   _variant STREQUAL "stubuddy-s3-n16r8-wss-echo" OR
+   _variant STREQUAL "stubuddy-s3-n16r8-ai-ptt")
     set(_opus_variant ON)
     set(_opus_sources "${COMPONENT_DIR}/boards/stubuddy-s3-n16r8/opus_loopback.cc")
     set(_opus_requires espressif__esp_audio_codec)
 endif()
 if(_variant STREQUAL "stubuddy-s3-n16r8-ws-echo" OR
-   _variant STREQUAL "stubuddy-s3-n16r8-wss-echo")
+   _variant STREQUAL "stubuddy-s3-n16r8-wss-echo" OR
+   _variant STREQUAL "stubuddy-s3-n16r8-ai-ptt")
     set(_ws_variant ON)
     set(_ws_sources "${COMPONENT_DIR}/boards/stubuddy-s3-n16r8/ws_echo.cc")
     set(_ws_requires espressif__esp_websocket_client)
     set(_ws_include "${PROJECT_DIR}/tmp")
-    if(_variant STREQUAL "stubuddy-s3-n16r8-wss-echo")
+    if(_variant STREQUAL "stubuddy-s3-n16r8-wss-echo" OR
+       _variant STREQUAL "stubuddy-s3-n16r8-ai-ptt")
         list(APPEND _ws_requires mbedtls)
     endif()
 endif()
@@ -102,9 +108,17 @@ if(NOT CMAKE_BUILD_EARLY_EXPANSION)
        (NOT _ws_variant AND CONFIG_STUBUDDY_WS_ECHO))
         message(FATAL_ERROR "stubuddy variant and PTT Kconfig disagree; use scripts/build.py")
     endif()
-    if((_variant STREQUAL "stubuddy-s3-n16r8-wss-echo" AND NOT CONFIG_STUBUDDY_WSS_ECHO) OR
-       (NOT _variant STREQUAL "stubuddy-s3-n16r8-wss-echo" AND CONFIG_STUBUDDY_WSS_ECHO))
+    set(_secure_variant OFF)
+    if(_variant STREQUAL "stubuddy-s3-n16r8-wss-echo" OR _variant STREQUAL "stubuddy-s3-n16r8-ai-ptt")
+        set(_secure_variant ON)
+    endif()
+    if((_secure_variant AND NOT CONFIG_STUBUDDY_WSS_ECHO) OR
+       (NOT _secure_variant AND CONFIG_STUBUDDY_WSS_ECHO))
         message(FATAL_ERROR "stubuddy TLS variant disagrees with Kconfig; use scripts/build.py")
+    endif()
+    if((_variant STREQUAL "stubuddy-s3-n16r8-ai-ptt" AND NOT CONFIG_STUBUDDY_AI_PTT) OR
+       (NOT _variant STREQUAL "stubuddy-s3-n16r8-ai-ptt" AND CONFIG_STUBUDDY_AI_PTT))
+        message(FATAL_ERROR "stubuddy AI variant disagrees with Kconfig; use scripts/build.py")
     endif()
     target_compile_options(${COMPONENT_LIB} PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-std=gnu++23>)
     target_compile_definitions(${COMPONENT_LIB} PRIVATE

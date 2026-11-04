@@ -1,0 +1,5 @@
+.private.json
+.deploy.tar.gz
+.venv/
+__pycache__/
+*.log

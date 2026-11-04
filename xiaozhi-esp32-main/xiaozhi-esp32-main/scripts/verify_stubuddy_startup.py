@@ -16,12 +16,13 @@ def verify(build_dir: Path, variant: str = "startup") -> None:
     for option in ("BOARD_TYPE_STUBUDDY_S3_N16R8", "XIAOZHI_HEADLESS_STARTUP", "SPIRAM",
                    "SPIRAM_MODE_OCT", "FLASH_NONE_ASSETS"):
         assert config.get(option) is True, f"Required config is missing: {option}"
-    secure = variant == "wss-echo"
-    websocket = variant in ("ws-echo", "wss-echo")
-    opus = variant in ("wifi-opus-ptt", "ws-echo", "wss-echo")
-    wifi = variant in ("wifi-ptt", "wifi-opus-ptt", "ws-echo", "wss-echo")
-    ptt = variant in ("ptt", "ptt-led", "wifi-ptt", "wifi-opus-ptt", "ws-echo", "wss-echo")
-    led = variant in ("ptt-led", "wifi-ptt", "wifi-opus-ptt", "ws-echo", "wss-echo")
+    ai = variant == "ai-ptt"
+    secure = variant in ("wss-echo", "ai-ptt")
+    websocket = variant in ("ws-echo", "wss-echo", "ai-ptt")
+    opus = variant in ("wifi-opus-ptt", "ws-echo", "wss-echo", "ai-ptt")
+    wifi = variant in ("wifi-ptt", "wifi-opus-ptt", "ws-echo", "wss-echo", "ai-ptt")
+    ptt = variant in ("ptt", "ptt-led", "wifi-ptt", "wifi-opus-ptt", "ws-echo", "wss-echo", "ai-ptt")
+    led = variant in ("ptt-led", "wifi-ptt", "wifi-opus-ptt", "ws-echo", "wss-echo", "ai-ptt")
     assert bool(config.get("STUBUDDY_PTT_SELFTEST")) == ptt, "Wrong startup/PTT mode"
     assert bool(config.get("STUBUDDY_STATUS_LED")) == led, "Wrong LED mode"
     assert bool(config.get("STUBUDDY_SOFTAP_SETUP")) == wifi, "Wrong Wi-Fi setup mode"
@@ -34,6 +35,7 @@ def verify(build_dir: Path, variant: str = "startup") -> None:
         for option in ("ESP_TLS_INSECURE", "ESP_TLS_SKIP_SERVER_CERT_VERIFY"):
             assert not config.get(option), f"Insecure TLS setting: {option}"
         assert config.get("LWIP_SNTP_MAX_SERVERS", 0) >= 2, "Two NTP servers required"
+    assert bool(config.get("STUBUDDY_AI_PTT")) == ai, "Wrong AI session mode"
     assert not config.get("BT_ENABLED"), "Bluetooth must remain disabled"
     sources = {Path(source).name for source in project["build_component_info"]["main"]["sources"]}
     expected = "ptt_main.cc" if ptt else "startup_main.cc"
@@ -87,7 +89,10 @@ def verify(build_dir: Path, variant: str = "startup") -> None:
     print("PASS: no display, camera, BLE or font components")
     print(f"PASS: Wi-Fi {'enabled with SoftAP provisioning' if wifi else 'excluded'}")
     print(f"PASS: Opus {'encoder and decoder linked' if opus else 'excluded'}")
-    print(f"PASS: WebSocket {'private echo/1 enabled' if websocket else 'excluded'}")
+    print(f"PASS: WebSocket {'private ai/1 enabled' if ai else 'private echo/1 enabled' if websocket else 'excluded'}")
+    if ai:
+        assert "ReadStreamPacket" in symbols and "DecodeStreamPacket" in symbols, "Missing streaming receiver/decoder"
+        print("PASS: AI stream receiver/decoder linked; negotiated downlink packet limit 1275 bytes")
     if secure:
         print("PASS: WSS certificate bundle, peer/validity checks and SNTP enabled; no insecure bypass")
     print("PASS: NVS 0x9000+0x6000 preserved; application starts at 0x10000")
@@ -97,7 +102,7 @@ def verify(build_dir: Path, variant: str = "startup") -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--variant", choices=("startup", "ptt", "ptt-led", "wifi-ptt", "wifi-opus-ptt", "ws-echo", "wss-echo"), default="startup")
+    parser.add_argument("--variant", choices=("startup", "ptt", "ptt-led", "wifi-ptt", "wifi-opus-ptt", "ws-echo", "wss-echo", "ai-ptt"), default="startup")
     args = parser.parse_args()
     try:
         verify(ROOT / "build", args.variant)

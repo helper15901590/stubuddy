@@ -1,5 +1,9 @@
 # stubuddy S3 N16R8：检查点3.1
 
+最新状态（2026-11-04）：3.6.2已真机通过并提交`6176ac9`。当前4.1合并PTT ASR/LLM/TTS，
+新增`stubuddy-s3-n16r8-ai-ptt`；已修复为流式TTS和独立1275字节下行上限。用户确认新版云端自测、编译、烧录及真机验收通过，首声明显缩短，按键打断、60秒和连续十轮正常；保留8轮完整历史加当前问题。Git状态以实际日志为准，停在本检查点。
+操作见[AI-PTT-VALIDATION.md](AI-PTT-VALIDATION.md)。下文保留各历史检查点的说明。
+
 实物约束（2026-11-03确认）：只有GPIO15主按键，没有BOOT/RST实体按键。
 GPIO15上电按住用于配网，不是芯片下载按键。烧录使用原生USB-Serial/JTAG自动下载，
 需要重新上电时拔插USB。USB断连恢复步骤见 [WSS-ECHO-VALIDATION.md](WSS-ECHO-VALIDATION.md)。
@@ -32,7 +36,7 @@ GPIO15上电按住用于配网，不是芯片下载按键。烧录使用原生US
 
 当前3.6.2新增 `stubuddy-s3-n16r8-wss-echo`：联网校时、严格TLS验证、独立云端Token，
 配套ECS部署前检查和IP证书续期。操作见 [WSS-ECHO-VALIDATION.md](WSS-ECHO-VALIDATION.md)。
-本机软件验证通过；ECS部署、证书续期演练和电脑公网WSS自测PASS。2026-11-03用户在成功烧录后反馈测试成功，待建立3.6.2 Git检查点。
+本机软件验证通过；ECS部署、证书续期演练和电脑公网WSS自测PASS。2026-11-03用户在成功烧录后反馈测试成功，已提交`6176ac9`。
 
 | 身份 | 值 |
 | --- | --- |
