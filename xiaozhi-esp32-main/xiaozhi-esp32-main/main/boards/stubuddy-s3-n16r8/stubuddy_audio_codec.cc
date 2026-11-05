@@ -68,6 +68,10 @@ void StubuddyAudioCodec::Start() {
         return;
     }
     output_volume_ = speech_output_.load() ? volume_state_.volume : 100;
+#ifdef CONFIG_STUBUDDY_COUNTDOWN
+    if (reminder_volume_ >= 0)
+        output_volume_ = reminder_volume_;
+#endif
 #endif
     const esp_err_t result = Initialize();
     if (result != ESP_OK)
@@ -140,6 +144,18 @@ void StubuddyAudioCodec::SelectSpeechOutput(bool speech) {
     speech_output_.store(speech);
     output_volume_ = speech ? volume_state_.volume : 100;
 }
+
+#ifdef CONFIG_STUBUDDY_COUNTDOWN
+void StubuddyAudioCodec::SelectReminderOutput(int volume, bool voice) {
+    reminder_volume_ = volume;
+    speech_output_.store(voice);
+    output_volume_ = volume;
+}
+void StubuddyAudioCodec::ClearReminderOutput() {
+    reminder_volume_ = -1;
+    SelectSpeechOutput(false);
+}
+#endif
 
 bool StubuddyAudioCodec::OnOutputSent(i2s_chan_handle_t, i2s_event_data_t* event, void* context) {
     auto& codec = *static_cast<StubuddyAudioCodec*>(context);

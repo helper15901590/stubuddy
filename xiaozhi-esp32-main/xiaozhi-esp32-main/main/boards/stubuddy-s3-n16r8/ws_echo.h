@@ -6,6 +6,11 @@
 #ifdef CONFIG_STUBUDDY_AI_CONTROLS
 #include "device_controls.h"
 #endif
+#ifdef CONFIG_STUBUDDY_COUNTDOWN
+#include <memory>
+#include "countdown_state.h"
+#include "reminder_cache.h"
+#endif
 
 #include <esp_websocket_client.h>
 #include <cJSON.h>
@@ -44,9 +49,15 @@ public:
     bool TakeVolumeRequest(VolumeRequest& request);
     void CompleteVolumeRequest(const VolumeResult& result);
 #endif
+#ifdef CONFIG_STUBUDDY_COUNTDOWN
+    bool ReminderReady(const char* id);
+    bool ReadReminder(const char* id, size_t& cursor, uint8_t* data, size_t& size,
+                      echo::Metadata& metadata);
+    void SyncCountdown(const CountdownState& state);
+#endif
 
 private:
-    enum class Kind { Start, Audio, Stop, Abort, Played, ToolResult };
+    enum class Kind { Start, Audio, Stop, Abort, Played, ToolResult, TimerSync };
     struct Command {
         Kind kind = Kind::Start;
         unsigned turn = 0, epoch = 0;
@@ -94,6 +105,9 @@ private:
     bool awaiting_tools_ = false;
     Command tool_reply_;  // Mutex-owned staging; no 4KiB WS callback stack allocation.
     void QueueVolumeResult(const VolumeResult& result);
+#endif
+#ifdef CONFIG_STUBUDDY_COUNTDOWN
+    std::unique_ptr<ReminderCache> reminder_;
 #endif
 };
 }  // namespace stubuddy

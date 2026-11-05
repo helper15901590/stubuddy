@@ -24,7 +24,7 @@ if(_variant STREQUAL "stubuddy-s3-n16r8-ptt" OR
    _variant STREQUAL "stubuddy-s3-n16r8-wifi-opus-ptt" OR
    _variant STREQUAL "stubuddy-s3-n16r8-ws-echo" OR
    _variant STREQUAL "stubuddy-s3-n16r8-wss-echo" OR
-   _variant MATCHES "^stubuddy-s3-n16r8-ai-ptt(-controls)?$")
+   _variant MATCHES "^stubuddy-s3-n16r8-ai-ptt(-(controls|countdown))?$")
     set(_entry "ptt_main.cc")
     set(_ptt_variant ON)
 endif()
@@ -33,7 +33,7 @@ if(_variant STREQUAL "stubuddy-s3-n16r8-ptt-led" OR
    _variant STREQUAL "stubuddy-s3-n16r8-wifi-opus-ptt" OR
    _variant STREQUAL "stubuddy-s3-n16r8-ws-echo" OR
    _variant STREQUAL "stubuddy-s3-n16r8-wss-echo" OR
-   _variant MATCHES "^stubuddy-s3-n16r8-ai-ptt(-controls)?$")
+   _variant MATCHES "^stubuddy-s3-n16r8-ai-ptt(-(controls|countdown))?$")
     set(_led_variant ON)
     set(_led_sources "${COMPONENT_DIR}/boards/stubuddy-s3-n16r8/status_led.cc")
     set(_led_requires esp_driver_ledc)
@@ -42,7 +42,7 @@ if(_variant STREQUAL "stubuddy-s3-n16r8-wifi-ptt" OR
    _variant STREQUAL "stubuddy-s3-n16r8-wifi-opus-ptt" OR
    _variant STREQUAL "stubuddy-s3-n16r8-ws-echo" OR
    _variant STREQUAL "stubuddy-s3-n16r8-wss-echo" OR
-   _variant MATCHES "^stubuddy-s3-n16r8-ai-ptt(-controls)?$")
+   _variant MATCHES "^stubuddy-s3-n16r8-ai-ptt(-(controls|countdown))?$")
     set(_wifi_variant ON)
     set(_wifi_sources "${COMPONENT_DIR}/boards/stubuddy-s3-n16r8/wifi_setup.cc"
                       "${COMPONENT_DIR}/boards/stubuddy-s3-n16r8/captive_dns.cc"
@@ -53,22 +53,26 @@ endif()
 if(_variant STREQUAL "stubuddy-s3-n16r8-wifi-opus-ptt" OR
    _variant STREQUAL "stubuddy-s3-n16r8-ws-echo" OR
    _variant STREQUAL "stubuddy-s3-n16r8-wss-echo" OR
-   _variant MATCHES "^stubuddy-s3-n16r8-ai-ptt(-controls)?$")
+   _variant MATCHES "^stubuddy-s3-n16r8-ai-ptt(-(controls|countdown))?$")
     set(_opus_variant ON)
     set(_opus_sources "${COMPONENT_DIR}/boards/stubuddy-s3-n16r8/opus_loopback.cc")
     set(_opus_requires espressif__esp_audio_codec)
 endif()
 if(_variant STREQUAL "stubuddy-s3-n16r8-ws-echo" OR
    _variant STREQUAL "stubuddy-s3-n16r8-wss-echo" OR
-   _variant MATCHES "^stubuddy-s3-n16r8-ai-ptt(-controls)?$")
+   _variant MATCHES "^stubuddy-s3-n16r8-ai-ptt(-(controls|countdown))?$")
     set(_ws_variant ON)
     set(_ws_sources "${COMPONENT_DIR}/boards/stubuddy-s3-n16r8/ws_echo.cc")
     set(_ws_requires espressif__esp_websocket_client)
     set(_ws_include "${PROJECT_DIR}/tmp")
     if(_variant STREQUAL "stubuddy-s3-n16r8-wss-echo" OR
-       _variant MATCHES "^stubuddy-s3-n16r8-ai-ptt(-controls)?$")
+       _variant MATCHES "^stubuddy-s3-n16r8-ai-ptt(-(controls|countdown))?$")
         list(APPEND _ws_requires mbedtls)
     endif()
+endif()
+
+if(_variant STREQUAL "stubuddy-s3-n16r8-ai-ptt-countdown")
+    list(APPEND _ws_sources "${COMPONENT_DIR}/boards/stubuddy-s3-n16r8/countdown.cc")
 endif()
 
 idf_component_register(
@@ -90,9 +94,13 @@ if(NOT CMAKE_BUILD_EARLY_EXPANSION)
         message(FATAL_ERROR "The startup variant requires the stubuddy S3 N16R8 board")
     endif()
     set(_identity_file "${CMAKE_CURRENT_LIST_DIR}/config.json")
-    if((_variant MATCHES "-ai-ptt-controls$" AND NOT CONFIG_STUBUDDY_AI_CONTROLS) OR
-       (NOT _variant MATCHES "-ai-ptt-controls$" AND CONFIG_STUBUDDY_AI_CONTROLS))
+    if((_variant MATCHES "-ai-ptt-(controls|countdown)$" AND NOT CONFIG_STUBUDDY_AI_CONTROLS) OR
+       (NOT _variant MATCHES "-ai-ptt-(controls|countdown)$" AND CONFIG_STUBUDDY_AI_CONTROLS))
         message(FATAL_ERROR "stubuddy controls variant and Kconfig disagree")
+    endif()
+    if((_variant MATCHES "-countdown$" AND NOT CONFIG_STUBUDDY_COUNTDOWN) OR
+       (NOT _variant MATCHES "-countdown$" AND CONFIG_STUBUDDY_COUNTDOWN))
+        message(FATAL_ERROR "stubuddy countdown variant and Kconfig disagree")
     endif()
     file(READ "${_identity_file}" _identity)
     string(JSON _board_type GET "${_identity}" type)
@@ -113,15 +121,15 @@ if(NOT CMAKE_BUILD_EARLY_EXPANSION)
         message(FATAL_ERROR "stubuddy variant and PTT Kconfig disagree; use scripts/build.py")
     endif()
     set(_secure_variant OFF)
-    if(_variant STREQUAL "stubuddy-s3-n16r8-wss-echo" OR _variant MATCHES "^stubuddy-s3-n16r8-ai-ptt(-controls)?$")
+    if(_variant STREQUAL "stubuddy-s3-n16r8-wss-echo" OR _variant MATCHES "^stubuddy-s3-n16r8-ai-ptt(-(controls|countdown))?$")
         set(_secure_variant ON)
     endif()
     if((_secure_variant AND NOT CONFIG_STUBUDDY_WSS_ECHO) OR
        (NOT _secure_variant AND CONFIG_STUBUDDY_WSS_ECHO))
         message(FATAL_ERROR "stubuddy TLS variant disagrees with Kconfig; use scripts/build.py")
     endif()
-    if((_variant MATCHES "^stubuddy-s3-n16r8-ai-ptt(-controls)?$" AND NOT CONFIG_STUBUDDY_AI_PTT) OR
-       (NOT _variant MATCHES "^stubuddy-s3-n16r8-ai-ptt(-controls)?$" AND CONFIG_STUBUDDY_AI_PTT))
+    if((_variant MATCHES "^stubuddy-s3-n16r8-ai-ptt(-(controls|countdown))?$" AND NOT CONFIG_STUBUDDY_AI_PTT) OR
+       (NOT _variant MATCHES "^stubuddy-s3-n16r8-ai-ptt(-(controls|countdown))?$" AND CONFIG_STUBUDDY_AI_PTT))
         message(FATAL_ERROR "stubuddy AI variant disagrees with Kconfig; use scripts/build.py")
     endif()
     target_compile_options(${COMPONENT_LIB} PRIVATE $<$<COMPILE_LANGUAGE:CXX>:-std=gnu++23>)

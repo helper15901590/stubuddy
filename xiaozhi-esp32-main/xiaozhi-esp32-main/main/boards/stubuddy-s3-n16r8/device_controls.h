@@ -1,20 +1,33 @@
 #pragma once
 #include <array>
+#include <cstdint>
 #include <cstring>
 
 namespace stubuddy {
+enum class TimerAction { None, Get, Start, Cancel, Volume };
 struct VolumeRequest {
     unsigned turn = 0;
     std::array<char, 17> id{};
     bool set = false;
     bool restore = false;
     int volume = -1;
+#ifdef CONFIG_STUBUDDY_COUNTDOWN
+    TimerAction action = TimerAction::None;
+    uint32_t seconds = 0;
+    std::array<char, 17> cache_id{};
+    std::array<char, 121> text{};
+#endif
     bool operator==(const VolumeRequest&) const = default;
 };
 struct VolumeResult {
     VolumeRequest request;
     bool ok = false;
     int volume = 100;
+#ifdef CONFIG_STUBUDDY_COUNTDOWN
+    bool active = false;
+    unsigned remaining = 0;
+    int alarm_volume = 50;
+#endif
 };
 
 // Called under the transport mutex. At most four serial calls per turn;

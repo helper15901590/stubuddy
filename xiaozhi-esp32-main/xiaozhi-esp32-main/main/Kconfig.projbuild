@@ -70,6 +70,14 @@ config STUBUDDY_AI_CONTROLS
         Negotiate restricted volume tools, persistent speech volume and DMA
         playback LED metering. Remain PTT only, without VAD or generic MCP.
 
+config STUBUDDY_COUNTDOWN
+    bool "Enable stubuddy single countdown reminder (checkpoint 4.3.1)"
+    depends on STUBUDDY_AI_CONTROLS
+    default n
+    help
+        One device-owned 1 minute to 24 hour countdown, prepared reminder voice
+        and independent persistent reminder volume. No calendar alarms or VAD.
+
 config OTA_URL
     string "Default OTA URL"
     default "https://api.tenclass.net/xiaozhi/ota/"

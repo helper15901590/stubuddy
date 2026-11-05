@@ -6,6 +6,13 @@
 #include "ptt_playback.h"
 #include "recording_pcm.h"
 #include "startup_audio.h"
+#ifdef CONFIG_STUBUDDY_COUNTDOWN
+#include <cmath>
+#include <ctime>
+#include "audio_levels.h"
+#include "countdown.h"
+#include "reminder_cycle.h"
+#endif
 #ifdef CONFIG_STUBUDDY_AI_PTT
 #include "stubuddy_audio_codec.h"
 #endif
@@ -45,7 +52,11 @@ constexpr char kTag[] = "STUBUDDY_PTT";
 stubuddy::WifiSetup wifi_setup;
 #endif
 #ifdef CONFIG_STUBUDDY_WS_ECHO
-#ifdef CONFIG_STUBUDDY_AI_CONTROLS
+#ifdef CONFIG_STUBUDDY_COUNTDOWN
+constexpr char kCheckpoint[] = "4.3.1 (single countdown; independent reminder volume)";
+stubuddy::Countdown countdown;
+bool countdown_boot_pending = false;
+#elif defined(CONFIG_STUBUDDY_AI_CONTROLS)
 constexpr char kCheckpoint[] = "4.2 (PTT volume tools and speech LED)";
 #elif defined(CONFIG_STUBUDDY_AI_PTT)
 constexpr char kCheckpoint[] = "4.1 (merged ASR/LLM/TTS)";
@@ -108,6 +119,26 @@ unsigned Milliseconds() { return static_cast<unsigned>(esp_timer_get_time() / 10
 
 bool RawButtonPressed() { return gpio_get_level(stubuddy::kMainButton) == 0; }
 
+#ifdef CONFIG_STUBUDDY_COUNTDOWN
+bool CountdownDue() {
+    const auto now = std::time(nullptr);
+    if (!stubuddy::CountdownState::TimeReady(now))
+        return false;
+    const bool boot_pending = countdown_boot_pending;
+    countdown_boot_pending = false;
+    const auto decision =
+        countdown.state().Decision(now, wifi_setup.online() && ws_echo.ready(),
+                                   ws_echo.ReminderReady(countdown.state().id), boot_pending);
+    if (decision == stubuddy::CountdownDecision::Skip) {
+        countdown.Consume();
+        ESP_LOGI("STUBUDDY_TIMER", "SKIPPED: %s; deleted; no catch-up",
+                 boot_pending ? "expired while powered off"
+                              : "offline or voice unavailable at deadline");
+    }
+    return decision == stubuddy::CountdownDecision::Play;
+}
+#endif
+
 void IndicateStartupPlayback(bool playing) {
     status_led.SetState(playing ? stubuddy::LedState::Playback : stubuddy::LedState::Idle);
 }
@@ -147,6 +178,10 @@ esp_err_t AwaitNetworkReady(AudioCodec& codec) {
     bool connected_cue_pending = false;
 #endif
     while (true) {
+#ifdef CONFIG_STUBUDDY_COUNTDOWN
+        if (CountdownDue())
+            return ESP_OK;
+#endif
         ESP_RETURN_ON_FALSE(!wifi_setup.failed(), ESP_FAIL, kTag, "WiFi controller fault");
         if (!wifi_setup.online() && !waited) {
             waited = true;
@@ -230,7 +265,7 @@ bool IdleSessionCurrent(unsigned epoch) {
 #endif
 }
 
-enum class ReplayOutcome { Finished, Interrupted, CaptureStarted, FreshPressReady };
+enum class ReplayOutcome { Finished, Interrupted, CaptureStarted, FreshPressReady, Reminder };
 
 #ifdef CONFIG_STUBUDDY_WS_ECHO
 // Called only by the audio owner, including while awaiting/decoding the echo.
@@ -337,10 +372,18 @@ esp_err_t StreamReply(AudioCodec& codec, int16_t* pcm, size_t samples, stubuddy:
         stubuddy::PttButton& button;
         stubuddy::PlaybackInterrupt& interrupt;
         bool cancelled = false;
+#ifdef CONFIG_STUBUDDY_COUNTDOWN
+        bool reminder = false;
+#endif
     } drain_context{button, interrupt};
     const auto keep_playing = [](void* raw) {
         auto& context = *static_cast<DrainContext*>(raw);
         context.button.Update(RawButtonPressed(), Milliseconds());
+#ifdef CONFIG_STUBUDDY_COUNTDOWN
+        context.reminder = CountdownDue();
+        if (context.reminder)
+            return false;
+#endif
         context.cancelled = context.interrupt.Update(context.button.pressed());
         return !context.cancelled;
     };
@@ -355,6 +398,16 @@ esp_err_t StreamReply(AudioCodec& codec, int16_t* pcm, size_t samples, stubuddy:
     stubuddy::RecordingLevels levels;
     while (true) {
         button.Update(RawButtonPressed(), Milliseconds());
+#ifdef CONFIG_STUBUDDY_COUNTDOWN
+        if (CountdownDue()) {
+            codec.AbortOutput();
+            ws_echo.Cancel();
+            status_led.SetState(stubuddy::LedState::Idle);
+            outcome = ReplayOutcome::Reminder;
+            ESP_LOGI("STUBUDDY_TIMER", "PREEMPT: waiting/AI reply discarded; no resume queue");
+            return ESP_OK;
+        }
+#endif
         if (interrupt.Update(button.pressed())) {
             codec.AbortOutput();
             ESP_RETURN_ON_FALSE(!codec.HasOutputError(), ESP_FAIL, kTag, "Stream abort failed");
@@ -372,6 +425,14 @@ esp_err_t StreamReply(AudioCodec& codec, int16_t* pcm, size_t samples, stubuddy:
 #ifdef CONFIG_STUBUDDY_AI_CONTROLS
         stubuddy::VolumeRequest request;
         if (ws_echo.TakeVolumeRequest(request)) {
+#ifdef CONFIG_STUBUDDY_COUNTDOWN
+            if (request.action != stubuddy::TimerAction::None) {
+                ws_echo.CompleteVolumeRequest(
+                    countdown.Apply(request, request.action != stubuddy::TimerAction::Start ||
+                                                 ws_echo.ReminderReady(request.cache_id.data())));
+                continue;
+            }
+#endif
             const auto result = request.restore ? speech_codec.RestoreSpeechVolume()
                                 : request.set   ? speech_codec.SetSpeechVolume(request.volume)
                                                 : ESP_OK;
@@ -428,6 +489,12 @@ esp_err_t StreamReply(AudioCodec& codec, int16_t* pcm, size_t samples, stubuddy:
                 break;
             }
             drain_output();  // Poll the key through final tail/DMA drain too.
+#ifdef CONFIG_STUBUDDY_COUNTDOWN
+            if (drain_context.reminder) {
+                outcome = ReplayOutcome::Reminder;
+                return ESP_OK;
+            }
+#endif
             status_led.SetPhase(stubuddy::PttLedPhase::ReleaseGate);
             ESP_RETURN_ON_FALSE(!codec.HasOutputError(), ESP_FAIL, kTag, "Stream shutdown failed");
             if (drain_context.cancelled)
@@ -471,6 +538,12 @@ esp_err_t StreamReply(AudioCodec& codec, int16_t* pcm, size_t samples, stubuddy:
             played += count;
         } else if (playing) {
             drain_output();
+#ifdef CONFIG_STUBUDDY_COUNTDOWN
+            if (drain_context.reminder) {
+                outcome = ReplayOutcome::Reminder;
+                return ESP_OK;
+            }
+#endif
             ESP_RETURN_ON_FALSE(!codec.HasOutputError(), ESP_FAIL, kTag, "Stream pause failed");
             if (drain_context.cancelled)
                 return InterruptWaitingEcho(codec, outcome);
@@ -485,6 +558,131 @@ esp_err_t StreamReply(AudioCodec& codec, int16_t* pcm, size_t samples, stubuddy:
     status_led.SetPhase(stubuddy::PttLedPhase::ReleaseGate);
     ESP_LOGW(kTag,
              "AI STREAM FAILED: partial audio discarded; server retains generated-answer history");
+    return ESP_OK;
+}
+#endif
+
+#ifdef CONFIG_STUBUDDY_COUNTDOWN
+esp_err_t PlayReminder(AudioCodec& codec, int16_t* pcm, stubuddy::PttButton& button,
+                       std::vector<int16_t>& block, ReplayOutcome& outcome) {
+    const auto saved = countdown.state();
+    // Claim once before physical output. A power cut during the announcement
+    // must not resurrect the reminder on the next boot.
+    const auto consumed = countdown.Consume();
+    codec.EnableInput(false);
+    codec.AbortOutput();
+    ws_echo.Cancel();
+    opus_loopback.Discard();
+    status_led.SetState(stubuddy::LedState::Idle);
+    if (consumed != ESP_OK) {
+        ESP_LOGE("STUBUDDY_TIMER", "DELETE FAILED: no playback/retry; inspect NVS");
+        return ESP_OK;
+    }
+    auto& output = static_cast<StubuddyAudioCodec&>(codec);
+    struct OutputScope {
+        StubuddyAudioCodec& codec;
+        ~OutputScope() {
+            codec.AbortOutput();
+            codec.ClearReminderOutput();
+        }
+    } scope{output};
+    stubuddy::PlaybackInterrupt interrupt(button.pressed());
+    struct Context {
+        stubuddy::PttButton& button;
+        stubuddy::PlaybackInterrupt& interrupt;
+        bool stopped = false;
+        bool limit_active = false, expired = false;
+        stubuddy::ReminderCycle cycle{0};
+    } context{button, interrupt};
+    const auto proceed = [](void* raw) {
+        auto& c = *static_cast<Context*>(raw);
+        c.button.Update(RawButtonPressed(), Milliseconds());
+        const bool playing =
+            c.cycle.Poll(Milliseconds(), c.interrupt.Update(c.button.pressed()), c.limit_active);
+        c.stopped = c.cycle.stopped();
+        c.expired = c.limit_active && c.cycle.Expired(Milliseconds());
+        return playing;
+    };
+    ESP_LOGI("STUBUDDY_TIMER", "DUE: reminder wins; old recording/reply discarded; alarm_volume=%d",
+             int(saved.alarm_volume));
+    ESP_RETURN_ON_ERROR(opus_loopback.StartStreamDecode(), kTag, "Reminder decoder reset failed");
+    size_t cursor = 0, index = 0, decoded = 0;
+    std::array<uint8_t, 227> packet{};
+    stubuddy::echo::Metadata metadata;
+    while (proceed(&context)) {
+        size_t size = 0, copied = 0;
+        if (!ws_echo.ReadReminder(saved.id, cursor, packet.data(), size, metadata))
+            break;
+        ESP_RETURN_ON_ERROR(
+            opus_loopback.DecodeStreamPacket({packet.data(), size}, index++, metadata.delay,
+                                             metadata.samples, pcm, copied),
+            kTag, "Reminder decode failed");
+        decoded += copied;
+    }
+    if (!context.stopped && (!decoded || decoded != metadata.samples || index != metadata.frames)) {
+        ESP_LOGW("STUBUDDY_TIMER", "PLAY FAILED: incomplete cached voice; deleted without retry");
+        std::memset(pcm, 0, decoded * sizeof(int16_t));
+        return ESP_OK;
+    }
+    const auto levels = stubuddy::AnalyzeRecording(pcm, decoded);
+    unsigned cycles = 0;
+    context.cycle.Begin(Milliseconds());
+    context.limit_active = true;
+    while (proceed(&context)) {
+        output.SelectReminderOutput(saved.alarm_volume, false);
+        codec.EnableOutput(true);
+        if (codec.HasOutputError() || !proceed(&context))
+            break;
+        status_led.SetState(stubuddy::LedState::Playback);
+        ESP_LOGI("STUBUDDY_TIMER", "REMINDER CYCLE: index=%u limit_ms=60000 gap_ms=3000", ++cycles);
+        // Each cycle reuses the prepared PCM: no extra TTS calls or allocation.
+        for (unsigned offset = 0; offset < 2400 && proceed(&context);) {
+            const unsigned size = std::min<unsigned>(160, 2400 - offset);
+            block.resize(size);
+            for (unsigned i = 0; i < size; ++i) {
+                const unsigned n = offset + i;
+                const float fade = std::min(1.0f, float(std::min(n, 2399 - n)) / 160);
+                block[i] = int16_t(stubuddy::kOutputPeakPcm16 * fade *
+                                   std::sin(2 * 3.14159265358979323846 * 880 * n / 16000));
+            }
+            codec.OutputData(block);
+            offset += size;
+        }
+        if (codec.HasOutputError() || !proceed(&context))
+            break;
+        output.SelectReminderOutput(saved.alarm_volume, true);
+        status_led.SetState(stubuddy::LedState::SpeechPlayback);
+        for (size_t offset = 0; offset < decoded && proceed(&context);) {
+            block.resize(std::min<size_t>(stubuddy::kFramesPerBlock, decoded - offset));
+            for (size_t i = 0; i < block.size(); ++i)
+                block[i] =
+                    stubuddy::ReplaySample(pcm[offset + i], offset + i, decoded, levels, 160);
+            codec.OutputData(block);
+            if (codec.HasOutputError())
+                break;
+            offset += block.size();
+        }
+        if (!context.stopped && !codec.HasOutputError())
+            output.FinishOutput(proceed, &context);
+        status_led.SetState(stubuddy::LedState::Idle);
+        if (codec.HasOutputError() || !proceed(&context))
+            break;
+        const unsigned finished = Milliseconds();
+        ESP_LOGI("STUBUDDY_TIMER", "REMINDER GAP: LED OFF; fresh press stops/deletes");
+        while (proceed(&context) && !context.cycle.NextReady(Milliseconds(), finished))
+            vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    codec.AbortOutput();
+    status_led.SetState(stubuddy::LedState::Idle);
+    std::memset(pcm, 0, decoded * sizeof(int16_t));
+    outcome = context.stopped        ? ReplayOutcome::Interrupted
+              : interrupt.released() ? ReplayOutcome::FreshPressReady
+                                     : ReplayOutcome::Finished;
+    ESP_LOGI("STUBUDDY_TIMER", "REMINDER END: reason=%s; deleted; LED OFF; no replay queue",
+             context.stopped          ? "button"
+             : codec.HasOutputError() ? "audio_failure"
+             : context.expired        ? "timeout"
+                                      : "complete");
     return ESP_OK;
 }
 #endif
@@ -588,6 +786,10 @@ esp_err_t RunPtt(AudioCodec& codec) {
 #ifdef CONFIG_STUBUDDY_OPUS_LOOPBACK
     ESP_RETURN_ON_ERROR(opus_loopback.Initialize(), kTag, "Opus loopback initialization failed");
 #endif
+#ifdef CONFIG_STUBUDDY_COUNTDOWN
+    ESP_RETURN_ON_ERROR(countdown.Load(), kTag, "Countdown NVS load failed");
+    countdown_boot_pending = countdown.state().deadline != 0;
+#endif
 #ifdef CONFIG_STUBUDDY_WS_ECHO
     ESP_RETURN_ON_ERROR(
         ws_echo.Start(wifi_setup, opus_loopback.echo_store(), opus_loopback.packet_limit()), kTag,
@@ -609,13 +811,47 @@ esp_err_t RunPtt(AudioCodec& codec) {
     bool preserve_idle_key = false;
     unsigned preserved_epoch = 0;
     size_t dirty_samples = 0;
+#ifdef CONFIG_STUBUDDY_COUNTDOWN
+    unsigned countdown_sync_epoch = 0;
+#endif
     while (true) {
+#ifdef CONFIG_STUBUDDY_COUNTDOWN
+        if (CountdownDue()) {
+            ReplayOutcome reminder_outcome = ReplayOutcome::Finished;
+            ESP_RETURN_ON_ERROR(
+                PlayReminder(codec, recording.get(), button, block, reminder_outcome), kTag,
+                "Reminder failed");
+            preserve_idle_key = reminder_outcome == ReplayOutcome::FreshPressReady;
+            preserved_epoch = NetworkEpoch();
+            continue_capture = false;
+            if (reminder_outcome == ReplayOutcome::Interrupted &&
+                IdleSessionCurrent(NetworkEpoch())) {
+                codec.EnableInput(true);
+                continue_capture = true;
+            }
+        }
+        if (ws_echo.ready() && countdown.state().deadline &&
+            !ws_echo.ReminderReady(countdown.state().id) &&
+            countdown_sync_epoch != ws_echo.epoch()) {
+            ws_echo.SyncCountdown(countdown.state());
+            countdown_sync_epoch = ws_echo.epoch();
+        }
+#endif
         if (!continue_capture) {
             // Keep release gates dark. Reading the raw held key here must never
             // relight the LED or arm another recording after playback completion.
             status_led.SetPhase(stubuddy::PttLedPhase::ReleaseGate);
 #ifdef CONFIG_STUBUDDY_SOFTAP_SETUP
             ESP_RETURN_ON_ERROR(AwaitNetworkReady(codec), kTag, "Network wait failed");
+#endif
+#ifdef CONFIG_STUBUDDY_COUNTDOWN
+            if (CountdownDue())
+                continue;
+            if (countdown.state().deadline && !ws_echo.ReminderReady(countdown.state().id) &&
+                countdown_sync_epoch != ws_echo.epoch()) {
+                ws_echo.SyncCountdown(countdown.state());
+                countdown_sync_epoch = ws_echo.epoch();
+            }
 #endif
             const unsigned epoch = NetworkEpoch();
             const bool resume_idle =
@@ -633,7 +869,11 @@ esp_err_t RunPtt(AudioCodec& codec) {
                                         "PDM warmup failed");
                 ESP_LOGI(kTag, "WAIT RELEASE: release GPIO15 before the next recording; LED OFF");
                 button.RequireRelease(RawButtonPressed(), Milliseconds());
-                while (button.pressed() && IdleSessionCurrent(epoch)) {
+                while (button.pressed() && IdleSessionCurrent(epoch)
+#ifdef CONFIG_STUBUDDY_COUNTDOWN
+                       && !CountdownDue()
+#endif
+                ) {
                     ESP_RETURN_ON_FALSE(codec.InputData(block), ESP_FAIL, kTag,
                                         "Release gate read failed");
                     button.Update(RawButtonPressed(), Milliseconds());
@@ -650,12 +890,23 @@ esp_err_t RunPtt(AudioCodec& codec) {
                     kTag,
                     "IDLE: hold GPIO15 to record; release to replay (0.3-60 seconds); LED OFF");
             }
-            while (!button.pressed() && IdleSessionCurrent(epoch)) {
+            while (!button.pressed() && IdleSessionCurrent(epoch)
+#ifdef CONFIG_STUBUDDY_COUNTDOWN
+                   && !CountdownDue()
+#endif
+            ) {
                 ESP_RETURN_ON_FALSE(codec.InputData(block), ESP_FAIL, kTag, "Idle read failed");
                 button.Update(RawButtonPressed(), Milliseconds());
                 if (IdleSessionCurrent(epoch))
                     status_led.SetPhase(stubuddy::PttLedPhase::ArmedIdle, button.pressed());
             }
+
+#ifdef CONFIG_STUBUDDY_COUNTDOWN
+            if (CountdownDue()) {
+                codec.EnableInput(false);
+                continue;
+            }
+#endif
 
             if (!IdleSessionCurrent(epoch)) {
                 codec.EnableInput(false);
@@ -685,7 +936,11 @@ esp_err_t RunPtt(AudioCodec& codec) {
         // cut the current round short; only the next idle session is gated.
         status_led.SetPhase(stubuddy::PttLedPhase::Recording);
         ESP_LOGI(kTag, "REC START: round=%u; amplifier OFF; LED=%s", ++round, kLedMode);
-        while (count < kMaxSamples && button.pressed()) {
+        while (count < kMaxSamples && button.pressed()
+#ifdef CONFIG_STUBUDDY_COUNTDOWN
+               && !CountdownDue()
+#endif
+        ) {
             block.resize(std::min(kPollSamples, kMaxSamples - count));
             ESP_RETURN_ON_FALSE(codec.InputData(block), ESP_FAIL, kTag, "Recording read failed");
             std::memcpy(recording.get() + count, block.data(), block.size() * sizeof(int16_t));
@@ -709,7 +964,14 @@ esp_err_t RunPtt(AudioCodec& codec) {
         if (limit)
             ESP_LOGI(kTag, "LIMIT: 60 seconds reached; LED OFF applied + 150ms; automatic replay");
         ReplayOutcome outcome = ReplayOutcome::Finished;
-        if (count < kMinSamples) {
+#ifdef CONFIG_STUBUDDY_COUNTDOWN
+        if (CountdownDue()) {
+            ws_echo.Cancel();
+            outcome = ReplayOutcome::Reminder;
+            ESP_LOGI("STUBUDDY_TIMER", "PREEMPT: recording discarded; child must record again");
+        } else
+#endif
+            if (count < kMinSamples) {
             ESP_LOGI(kTag, "DROP: recording shorter than 300 ms; no replay");
 #ifdef CONFIG_STUBUDDY_WS_ECHO
             ws_echo.Cancel();

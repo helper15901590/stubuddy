@@ -40,6 +40,9 @@
 #include <cmath>
 #include <cstdio>
 #include <string>
+#ifdef CONFIG_STUBUDDY_COUNTDOWN
+#include <mbedtls/base64.h>
+#endif
 
 namespace stubuddy {
 #ifdef CONFIG_STUBUDDY_AI_PTT
@@ -87,6 +90,12 @@ esp_err_t WsEcho::Start(WifiSetup& wifi, OpusPacketStore& received, size_t packe
     received_ = &received;
     packet_limit_ = packet_limit;
     rx_mutex_ = xSemaphoreCreateMutex();
+#ifdef CONFIG_STUBUDDY_COUNTDOWN
+    auto* reminder_storage = static_cast<uint8_t*>(
+        heap_caps_malloc(ReminderCache::kCapacity, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    ESP_RETURN_ON_FALSE(reminder_storage, ESP_ERR_NO_MEM, kTag, "Cannot allocate reminder cache");
+    reminder_ = std::make_unique<ReminderCache>(reminder_storage);
+#endif
     queue_storage_ = static_cast<uint8_t*>(
         heap_caps_malloc(kQueueDepth * sizeof(Command), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
     ESP_RETURN_ON_FALSE(rx_mutex_ && queue_storage_, ESP_ERR_NO_MEM, kTag,
@@ -315,6 +324,39 @@ void WsEcho::CompleteVolumeRequest(const VolumeResult& result) {
 }
 #endif
 
+#ifdef CONFIG_STUBUDDY_COUNTDOWN
+bool WsEcho::ReminderReady(const char* id) {
+    xSemaphoreTake(rx_mutex_, portMAX_DELAY);
+    const bool ready = reminder_->Ready(id);
+    xSemaphoreGive(rx_mutex_);
+    return ready;
+}
+bool WsEcho::ReadReminder(const char* id, size_t& cursor, uint8_t* data, size_t& size,
+                          echo::Metadata& metadata) {
+    xSemaphoreTake(rx_mutex_, portMAX_DELAY);
+    const bool ok = reminder_->Read(id, cursor, data, size, metadata);
+    xSemaphoreGive(rx_mutex_);
+    return ok;
+}
+void WsEcho::SyncCountdown(const CountdownState& state) {
+    Command command;
+    command.kind = Kind::TimerSync;
+    command.epoch = epoch();
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "type", "countdown_sync");
+    cJSON_AddStringToObject(root, "id", state.id);
+    cJSON_AddStringToObject(root, "text", state.text);
+    char* text = cJSON_PrintUnformatted(root);
+    if (text && std::strlen(text) < sizeof(command.payload)) {
+        command.size = std::strlen(text);
+        std::memcpy(command.payload, text, command.size + 1);
+        Enqueue(command);
+    }
+    cJSON_free(text);
+    cJSON_Delete(root);
+}
+#endif
+
 bool WsEcho::ReadMetadata(const cJSON* root, echo::Metadata& m) {
     return UInt(root, "turn", m.turn) && UInt(root, "samples", m.samples) &&
            UInt(root, "delay", m.delay) && UInt(root, "frames", m.frames) &&
@@ -417,6 +459,14 @@ void WsEcho::OnMessage(unsigned opcode, const uint8_t* data, size_t size) {
                 return;
             }
             ESP_LOGI(kTag, "DEVICE CONTROLS READY: volume_restore=1; restricted tools v1");
+#ifdef CONFIG_STUBUDDY_COUNTDOWN
+            uint32_t countdown = 0;
+            if (!UInt(root, "countdown", countdown) || countdown != 1) {
+                cJSON_Delete(root);
+                Fault("server_missing_countdown_update_server_first");
+                return;
+            }
+#endif
 #endif
 #endif
             wifi_epoch_.store(wifi_->link_epoch());
@@ -435,6 +485,42 @@ void WsEcho::OnMessage(unsigned opcode, const uint8_t* data, size_t size) {
             Fault();
     } else if (Text(root, "type", "pong")) {
         last_rx_.store(Now());
+#ifdef CONFIG_STUBUDDY_COUNTDOWN
+    } else if (Text(root, "type", "countdown_cache") || Text(root, "type", "countdown_packet")) {
+        const auto* id = cJSON_GetObjectItemCaseSensitive(root, "id");
+        bool ok = ready() && Text(root, "session_id", session_id_.data()) && cJSON_IsString(id) &&
+                  std::strlen(id->valuestring) == 16 &&
+                  std::strspn(id->valuestring, "0123456789abcdef") == 16;
+        if (ok) {
+            if (Text(root, "type", "countdown_packet")) {
+                uint32_t index = 0;
+                const auto* encoded = cJSON_GetObjectItemCaseSensitive(root, "data");
+                std::array<uint8_t, 227> packet{};
+                size_t length = 0;
+                ok = UInt(root, "sequence", index) && cJSON_IsString(encoded) &&
+                     std::strlen(encoded->valuestring) <= 304 &&
+                     mbedtls_base64_decode(
+                         packet.data(), packet.size(), &length,
+                         reinterpret_cast<const unsigned char*>(encoded->valuestring),
+                         std::strlen(encoded->valuestring)) == 0 &&
+                     reminder_->Push(id->valuestring, index, packet.data(), length);
+            } else if (Text(root, "state", "start")) {
+                ok = reminder_->Begin(id->valuestring);
+            } else {
+                uint32_t samples = 0, delay = 0, frames = 0, crc = 0;
+                ok = Text(root, "state", "end") && UInt(root, "samples", samples) &&
+                     UInt(root, "delay", delay) && UInt(root, "frames", frames) &&
+                     UInt(root, "crc32", crc) &&
+                     reminder_->Finish(id->valuestring, samples, delay, frames, crc);
+                if (ok)
+                    ESP_LOGI(kTag, "COUNTDOWN CACHE READY: samples=%u frames=%u", samples, frames);
+            }
+        }
+        if (!ok)
+            Fault("invalid_countdown_cache");
+        last_rx_.store(Now());
+        progress_at_.store(Now());
+#endif
     } else {
         uint32_t turn = 0;
         if (!UInt(root, "turn", turn)) {
@@ -457,10 +543,23 @@ void WsEcho::OnMessage(unsigned opcode, const uint8_t* data, size_t size) {
             const auto* id = cJSON_GetObjectItemCaseSensitive(root, "call_id");
             const bool set = Text(root, "name", "self.audio_speaker.set_volume");
             const bool restore = Text(root, "name", "self.audio_speaker.restore_volume");
+            bool timer = false;
+#ifdef CONFIG_STUBUDDY_COUNTDOWN
+            TimerAction action = TimerAction::None;
+            if (Text(root, "name", "self.countdown.get"))
+                action = TimerAction::Get;
+            if (Text(root, "name", "self.countdown.start"))
+                action = TimerAction::Start;
+            if (Text(root, "name", "self.countdown.cancel"))
+                action = TimerAction::Cancel;
+            if (Text(root, "name", "self.countdown.volume"))
+                action = TimerAction::Volume;
+            timer = action != TimerAction::None;
+#endif
             uint32_t volume = 0;
             if (!awaiting_tools_ || !cJSON_IsString(id) || std::strlen(id->valuestring) != 16 ||
                 std::strspn(id->valuestring, "0123456789abcdef") != 16 ||
-                (!set && !restore && !Text(root, "name", "self.get_device_status")) ||
+                (!timer && !set && !restore && !Text(root, "name", "self.get_device_status")) ||
                 (set && (!UInt(root, "volume", volume) || volume > 100))) {
                 cJSON_Delete(root);
                 Fault("invalid_device_tool");
@@ -472,6 +571,33 @@ void WsEcho::OnMessage(unsigned opcode, const uint8_t* data, size_t size) {
             request.set = set;
             request.restore = restore;
             request.volume = set ? int(volume) : -1;
+#ifdef CONFIG_STUBUDDY_COUNTDOWN
+            request.action = action;
+            if (action == TimerAction::Volume) {
+                if (!UInt(root, "volume", volume) || volume > 100) {
+                    cJSON_Delete(root);
+                    Fault("invalid_alarm_volume");
+                    return;
+                }
+                request.volume = int(volume);
+            }
+            if (action == TimerAction::Start) {
+                const auto* id = cJSON_GetObjectItemCaseSensitive(root, "cache_id");
+                const auto* text = cJSON_GetObjectItemCaseSensitive(root, "text");
+                if (!UInt(root, "seconds", request.seconds) || request.seconds < 60 ||
+                    request.seconds > 86400 || !cJSON_IsString(id) ||
+                    std::strlen(id->valuestring) != 16 ||
+                    std::strspn(id->valuestring, "0123456789abcdef") != 16 ||
+                    !cJSON_IsString(text) || !text->valuestring[0] ||
+                    std::strlen(text->valuestring) > 120) {
+                    cJSON_Delete(root);
+                    Fault("invalid_countdown_start");
+                    return;
+                }
+                std::strcpy(request.cache_id.data(), id->valuestring);
+                std::strcpy(request.text.data(), text->valuestring);
+            }
+#endif
             VolumeResult cached;
             const auto arrival = tools_.Receive(request, cached);
             if (arrival == VolumeMailbox::Arrival::Invalid ||
@@ -700,8 +826,13 @@ void WsEcho::Worker() {
             close_requested_.store(false);
 #ifdef CONFIG_STUBUDDY_AI_PTT
 #ifdef CONFIG_STUBUDDY_AI_CONTROLS
+#ifdef CONFIG_STUBUDDY_COUNTDOWN
+            SendText(
+                R"({"type":"hello","version":1,"transport":"websocket","ai_protocol":1,"reply_stream":1,"max_reply_packet_bytes":1275,"device_controls":1,"volume_restore":1,"countdown":1,"audio_params":{"format":"opus","sample_rate":16000,"channels":1,"frame_duration":60}})");
+#else
             SendText(
                 R"({"type":"hello","version":1,"transport":"websocket","ai_protocol":1,"reply_stream":1,"max_reply_packet_bytes":1275,"device_controls":1,"volume_restore":1,"audio_params":{"format":"opus","sample_rate":16000,"channels":1,"frame_duration":60}})");
+#endif
 #else
             SendText(
                 R"({"type":"hello","version":1,"transport":"websocket","ai_protocol":1,"reply_stream":1,"max_reply_packet_bytes":1275,"audio_params":{"format":"opus","sample_rate":16000,"channels":1,"frame_duration":60}})");
@@ -732,10 +863,12 @@ void WsEcho::Worker() {
             continue;
         if (!ready() || sending_.epoch != epoch() ||
             (sending_.kind != Kind::Abort && sending_.kind != Kind::Played &&
-             sending_.turn != active_turn_.load()))
+             sending_.kind != Kind::TimerSync && sending_.turn != active_turn_.load()))
             continue;
         char text[384];
-        if (sending_.kind == Kind::Audio) {
+        if (sending_.kind == Kind::TimerSync) {
+            SendText(reinterpret_cast<const char*>(sending_.payload));
+        } else if (sending_.kind == Kind::Audio) {
             const size_t size =
                 echo::PackAudio(wire_.data(), wire_.size(), sending_.turn, sending_.metadata.frames,
                                 sending_.payload, sending_.size);
@@ -768,6 +901,19 @@ void WsEcho::Worker() {
         }
 #ifdef CONFIG_STUBUDDY_AI_CONTROLS
         else if (sending_.kind == Kind::ToolResult) {
+#ifdef CONFIG_STUBUDDY_COUNTDOWN
+            if (sending_.tool.request.action != TimerAction::None) {
+                std::snprintf(
+                    text, sizeof(text),
+                    "{\"type\":\"tool_result\",\"turn\":%u,\"call_id\":\"%s\",\"session_id\":\"%"
+                    "s\",\"ok\":%s,\"active\":%s,\"remaining\":%u,\"alarm_volume\":%d}",
+                    sending_.turn, sending_.tool.request.id.data(), sending_.session.data(),
+                    sending_.tool.ok ? "true" : "false", sending_.tool.active ? "true" : "false",
+                    sending_.tool.remaining, sending_.tool.alarm_volume);
+                SendText(text);
+                continue;
+            }
+#endif
             std::snprintf(text, sizeof(text),
                           "{\"type\":\"tool_result\",\"turn\":%u,\"call_id\":\"%s\",\"session_id\":"
                           "\"%s\",\"ok\":%s,\"volume\":%d}",

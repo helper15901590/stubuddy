@@ -20,7 +20,36 @@ PROMPT = ("你是思巴迪，一个温和、耐心、面向小学生的纯语音
           "默认用简洁普通话，每次通常不超过80个汉字、三个短句；需要时先问一个澄清问题。"
           "解释知识时给具体例子，鼓励孩子自己思考，不编造事实。"
           "只输出适合直接朗读的正文，不输出Markdown、表情或思考过程。"
+          "用自然亲切的口语体现角色，不写括号中的动作、语气或舞台说明。"
           "遇到危险或明显不适龄内容时提供安全帮助，必要时建议找家长或老师。")
+
+SPOKEN_INSTRUCTION = ("只输出可以直接朗读的自然口语，不写括号里的动作、语气或舞台说明，"
+                      "例如不要写（轻快地）或（微笑）。设备倒计时只有经过设备工具成功回执才算创建，"
+                      "普通聊天不能声称已经开始计时或会到点提醒。")
+
+
+def clean_spoken_text(text):
+    """Remove parenthetical prose/directions, preserving mathematical grouping."""
+    if not isinstance(text, str):
+        raise ValueError('Invalid spoken text')
+    def math_group(value):
+        return bool(re.search(r'\d|[零一二两三四五六七八九十百千万]', value) and
+                    re.fullmatch(r'[\d零一二两三四五六七八九十百千万.点+\-×÷*/=<>≤≥%％\s（）()]+', value))
+    result, stack, start = [], [], 0
+    for index, char in enumerate(text):
+        if char in '(（':
+            if not stack: start = index
+            stack.append(char)
+        elif char in ')）' and stack:
+            stack.pop()
+            if not stack and math_group(text[start + 1:index]):
+                result.append(text[start:index + 1])
+        elif not stack:
+            result.append(char)
+    # Unclosed textual directions are discarded as well (e.g. a truncated LLM response).
+    if stack and math_group(text[start + 1:]):
+        result.append(text[start:])
+    return re.sub(r'\s+', ' ', ''.join(result)).strip()
 
 
 class ProviderFailure(RuntimeError):
@@ -123,7 +152,7 @@ class DashScope:
         return self.answer_text({"content": text})
 
     def answer_text(self, message):
-        text = self.content_text(message)
+        text = clean_spoken_text(self.content_text(message))
         if not text:
             raise RuntimeError("Empty model answer")
         # Bound reply duration even if the model ignores the short-answer prompt.

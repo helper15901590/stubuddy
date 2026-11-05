@@ -26,6 +26,10 @@ public:
     esp_err_t RestoreSpeechVolume() { return SetSpeechVolume(volume_state_.audible); }
     esp_err_t SetSpeechVolume(int volume);
     void SelectSpeechOutput(bool speech);
+#ifdef CONFIG_STUBUDDY_COUNTDOWN
+    void SelectReminderOutput(int volume, bool voice);
+    void ClearReminderOutput();
+#endif
     void SetSpeechMeter(void (*callback)(void*, unsigned), void* context) {
         meter_callback_ = callback;
         meter_context_ = context;
@@ -58,6 +62,9 @@ private:
     static bool IRAM_ATTR OnOutputSent(i2s_chan_handle_t, i2s_event_data_t*, void*);
     stubuddy::SpeechVolumeState volume_state_;
     bool volume_loaded_ = false;
+#ifdef CONFIG_STUBUDDY_COUNTDOWN
+    int reminder_volume_ = -1;
+#endif
     std::atomic<bool> speech_output_{false};
     void (*meter_callback_)(void*, unsigned) = nullptr;
     void* meter_context_ = nullptr;

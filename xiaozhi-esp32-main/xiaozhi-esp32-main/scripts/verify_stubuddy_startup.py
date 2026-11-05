@@ -16,13 +16,13 @@ def verify(build_dir: Path, variant: str = "startup") -> None:
     for option in ("BOARD_TYPE_STUBUDDY_S3_N16R8", "XIAOZHI_HEADLESS_STARTUP", "SPIRAM",
                    "SPIRAM_MODE_OCT", "FLASH_NONE_ASSETS"):
         assert config.get(option) is True, f"Required config is missing: {option}"
-    ai = variant in ("ai-ptt", "ai-ptt-controls")
-    secure = variant in ("wss-echo", "ai-ptt", "ai-ptt-controls")
-    websocket = variant in ("ws-echo", "wss-echo", "ai-ptt", "ai-ptt-controls")
-    opus = variant in ("wifi-opus-ptt", "ws-echo", "wss-echo", "ai-ptt", "ai-ptt-controls")
-    wifi = variant in ("wifi-ptt", "wifi-opus-ptt", "ws-echo", "wss-echo", "ai-ptt", "ai-ptt-controls")
-    ptt = variant in ("ptt", "ptt-led", "wifi-ptt", "wifi-opus-ptt", "ws-echo", "wss-echo", "ai-ptt", "ai-ptt-controls")
-    led = variant in ("ptt-led", "wifi-ptt", "wifi-opus-ptt", "ws-echo", "wss-echo", "ai-ptt", "ai-ptt-controls")
+    ai = variant in ("ai-ptt", "ai-ptt-controls", "ai-ptt-countdown")
+    secure = variant in ("wss-echo", "ai-ptt", "ai-ptt-controls", "ai-ptt-countdown")
+    websocket = variant in ("ws-echo", "wss-echo", "ai-ptt", "ai-ptt-controls", "ai-ptt-countdown")
+    opus = variant in ("wifi-opus-ptt", "ws-echo", "wss-echo", "ai-ptt", "ai-ptt-controls", "ai-ptt-countdown")
+    wifi = variant in ("wifi-ptt", "wifi-opus-ptt", "ws-echo", "wss-echo", "ai-ptt", "ai-ptt-controls", "ai-ptt-countdown")
+    ptt = variant in ("ptt", "ptt-led", "wifi-ptt", "wifi-opus-ptt", "ws-echo", "wss-echo", "ai-ptt", "ai-ptt-controls", "ai-ptt-countdown")
+    led = variant in ("ptt-led", "wifi-ptt", "wifi-opus-ptt", "ws-echo", "wss-echo", "ai-ptt", "ai-ptt-controls", "ai-ptt-countdown")
     assert bool(config.get("STUBUDDY_PTT_SELFTEST")) == ptt, "Wrong startup/PTT mode"
     assert bool(config.get("STUBUDDY_STATUS_LED")) == led, "Wrong LED mode"
     assert bool(config.get("STUBUDDY_SOFTAP_SETUP")) == wifi, "Wrong Wi-Fi setup mode"
@@ -36,7 +36,9 @@ def verify(build_dir: Path, variant: str = "startup") -> None:
             assert not config.get(option), f"Insecure TLS setting: {option}"
         assert config.get("LWIP_SNTP_MAX_SERVERS", 0) >= 2, "Two NTP servers required"
     assert bool(config.get("STUBUDDY_AI_PTT")) == ai, "Wrong AI session mode"
-    assert bool(config.get("STUBUDDY_AI_CONTROLS")) == (variant == "ai-ptt-controls"), "Wrong device controls mode"
+    assert bool(config.get("STUBUDDY_AI_CONTROLS")) == (variant in ("ai-ptt-controls", "ai-ptt-countdown")), "Wrong device controls mode"
+    assert bool(config.get("STUBUDDY_COUNTDOWN")) == (variant == "ai-ptt-countdown"), "Wrong countdown mode"
+    assert ("countdown.cc" in {Path(s).name for s in project["build_component_info"]["main"]["sources"]}) == (variant == "ai-ptt-countdown"), "Wrong countdown source"
     assert not config.get("BT_ENABLED"), "Bluetooth must remain disabled"
     sources = {Path(source).name for source in project["build_component_info"]["main"]["sources"]}
     expected = "ptt_main.cc" if ptt else "startup_main.cc"
@@ -94,9 +96,12 @@ def verify(build_dir: Path, variant: str = "startup") -> None:
     if ai:
         assert "ReadStreamPacket" in symbols and "DecodeStreamPacket" in symbols, "Missing streaming receiver/decoder"
         print("PASS: AI stream receiver/decoder linked; negotiated downlink packet limit 1275 bytes")
-    if variant == "ai-ptt-controls":
+    if variant in ("ai-ptt-controls", "ai-ptt-countdown"):
         assert "SetSpeechVolume" in symbols and "OnOutputSent" in symbols, "Missing persistent volume/DMA meter"
         print("PASS: restricted device volume tools, persistent speech volume and DMA speech LED linked; PTT only")
+    if variant == 'ai-ptt-countdown':
+        assert 'ReadReminder' in symbols and 'SyncCountdown' in symbols, 'Missing prepared reminder channel'
+        print('PASS: isolated countdown, prepared reminder cache and independent persistent reminder volume linked')
     if secure:
         print("PASS: WSS certificate bundle, peer/validity checks and SNTP enabled; no insecure bypass")
     print("PASS: NVS 0x9000+0x6000 preserved; application starts at 0x10000")
@@ -106,7 +111,7 @@ def verify(build_dir: Path, variant: str = "startup") -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--variant", choices=("startup", "ptt", "ptt-led", "wifi-ptt", "wifi-opus-ptt", "ws-echo", "wss-echo", "ai-ptt", "ai-ptt-controls"), default="startup")
+    parser.add_argument("--variant", choices=("startup", "ptt", "ptt-led", "wifi-ptt", "wifi-opus-ptt", "ws-echo", "wss-echo", "ai-ptt", "ai-ptt-controls", "ai-ptt-countdown"), default="startup")
     args = parser.parse_args()
     try:
         verify(ROOT / "build", args.variant)
