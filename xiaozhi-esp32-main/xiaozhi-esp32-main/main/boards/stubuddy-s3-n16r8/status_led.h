@@ -1,6 +1,10 @@
 #pragma once
+#include "sdkconfig.h"
 
 #include "led_pattern.h"
+#ifdef CONFIG_STUBUDDY_AI_CONTROLS
+#include "playback_led.h"
+#endif
 
 #include <esp_err.h>
 #include <esp_timer.h>
@@ -19,6 +23,9 @@ public:
     esp_err_t Initialize();
     void SetState(LedState state);
     void SetNetworkState(NetworkLedState state);
+#ifdef CONFIG_STUBUDDY_AI_CONTROLS
+    void IRAM_ATTR PublishPlaybackPower(unsigned power);
+#endif
     // Wait for the timer's actual PWM update before allowing replay to relight
     // the LED. minimum_off_ms is used only for the visible 60-second transition.
     esp_err_t ShowCaptureStopped(unsigned minimum_off_ms);
@@ -40,5 +47,10 @@ private:
     unsigned generation_ = 0;
     unsigned applied_generation_ = 0;
     bool output_error_logged_ = false;
+#ifdef CONFIG_STUBUDDY_AI_CONTROLS
+    unsigned meter_power_ = 0;
+    unsigned envelope_generation_ = 0;
+    PlaybackEnvelope envelope_;
+#endif
 };
 }  // namespace stubuddy

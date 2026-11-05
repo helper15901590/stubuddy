@@ -1,5 +1,8 @@
+#include "device_controls.h"
 #include "led_pattern.h"
+#include "playback_led.h"
 #include "ptt_button.h"
+#include "speech_volume.h"
 
 #include <cassert>
 #include <initializer_list>
@@ -98,6 +101,75 @@ constexpr bool PatternsAndPriorityPass() {
 static_assert(PttLedState(PttLedPhase::ReleaseGate, true) == LedState::Idle,
               "Held-key release gates must stay dark");
 int main() {
+    auto volume = SpeechVolumeState::Legacy(50);
+    assert(volume.Valid() && volume.volume == 50 && volume.audible == 50);
+    volume = volume.WithVolume(30).WithVolume(0).WithVolume(0);
+    assert(volume.Valid() && volume.volume == 0 && volume.audible == 30);
+    SpeechVolumeState rebooted;
+    std::memcpy(&rebooted, &volume, sizeof(volume));
+    assert(rebooted.Valid() && rebooted.volume == 0 && rebooted.audible == 30);
+    rebooted = rebooted.WithVolume(rebooted.audible);
+    assert(rebooted.Valid() && rebooted.volume == 30);
+    assert(SpeechVolumeState::Legacy(0).audible == 100);
+    assert(!SpeechVolumeState::Legacy(101).Valid());
+    rebooted.version = 0;
+    assert(!rebooted.Valid());
+    using namespace stubuddy;
+    assert(UniformBreath(0) == 0 && UniformBreath(1000) == 1023 && UniformBreath(2000) == 0);
+    for (unsigned i = 1; i <= 1000; ++i) {
+        assert(UniformBreath(i) >= UniformBreath(i - 1));
+        assert(UniformBreath(i) == UniformBreath(2000 - i));
+    }
+    PlaybackEnvelope loud, quiet;
+    PlaybackEnvelope full, half;
+    for (int i = 0; i < 20; ++i) {
+        const auto full_duty = full.Update(kOutputPeakPcm16 * kOutputPeakPcm16);
+        const auto half_duty = half.Update((kOutputPeakPcm16 / 2) * (kOutputPeakPcm16 / 2));
+        assert(full_duty > half_duty && half_duty < 800);
+    }
+    for (int i = 0; i < 20; ++i)
+        assert(loud.Update(90000) > quiet.Update(900));
+    unsigned previous = loud.Update(0);
+    for (int i = 0; i < 30; ++i) {
+        const unsigned next = loud.Update(0);
+        assert(next <= previous);
+        previous = next;
+    }
+    assert(previous == 0);
+    loud.Reset();
+    assert(loud.Update(0) == 0);  // Cancellation/mute cannot inherit old brightness.
+    assert(LedBrightness(LedState::SpeechPlayback, 0) == 0);
+    assert(EffectiveLedState(LedState::SpeechPlayback, NetworkLedState::Connecting) ==
+           LedState::SpeechPlayback);
+    VolumeMailbox mailbox;
+    VolumeRequest request;
+    request.turn = 1;
+    request.id.fill('a');
+    request.id.back() = 0;
+    request.set = true;
+    request.volume = 30;
+    VolumeResult cached;
+    assert(mailbox.Receive(request, cached) == VolumeMailbox::Arrival::New);
+    assert(mailbox.Receive(request, cached) == VolumeMailbox::Arrival::Waiting);
+    VolumeRequest taken;
+    assert(mailbox.Take(taken) && !mailbox.Take(taken));
+    assert(mailbox.Complete({request, true, 30}));
+    assert(mailbox.Receive(request, cached) == VolumeMailbox::Arrival::Cached &&
+           cached.volume == 30);
+    auto reused = request;
+    reused.volume = 50;
+    assert(mailbox.Receive(reused, cached) == VolumeMailbox::Arrival::Invalid);
+    mailbox.Reset();
+    assert(!mailbox.Take(taken));
+    assert(!mailbox.Complete({request, true, 30}));
+    for (unsigned i = 0; i < 4; ++i) {
+        request.id[0] = char('a' + i);
+        assert(mailbox.Receive(request, cached) == VolumeMailbox::Arrival::New);
+        assert(mailbox.Take(taken));
+        assert(mailbox.Complete({request, true, 30}));
+    }
+    request.id[0] = 'f';
+    assert(mailbox.Receive(request, cached) == VolumeMailbox::Arrival::Invalid);
     assert(HeldPlaybackCompletionStaysDark());
     assert(PatternsAndPriorityPass());
 }

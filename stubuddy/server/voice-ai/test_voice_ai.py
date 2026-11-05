@@ -286,12 +286,38 @@ class ProviderContractTests(unittest.IsolatedAsyncioTestCase):
                                client_type(transport=httpx.MockTransport(handle), **kw)):
             provider = DashScope(self.settings())
             self.assertEqual(await provider.recognize(bytes(9600)), "你好")
+            pooled_client = provider.client
             await provider.answer([{"role": "user", "content": "你好"}])
+            self.assertIs(provider.client, pooled_client)
+            await provider.aclose()
+            self.assertTrue(pooled_client.is_closed)
         self.assertEqual(requests[0]["model"], "qwen3-asr-flash")
         self.assertTrue(requests[0]["messages"][0]["content"][0]["input_audio"]["data"].startswith("data:audio/wav;base64,"))
         self.assertEqual(requests[0]["asr_options"], {"enable_itn": True})
         self.assertFalse(requests[1]["enable_thinking"])
         self.assertEqual(requests[1]["max_tokens"], 256)
+
+    async def test_cancelled_http_request_does_not_poison_shared_pool(self):
+        entered = asyncio.Event()
+        calls = 0
+        async def handle(request):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                entered.set()
+                await asyncio.Future()
+            return httpx.Response(200, json={"choices":[{"message":{"content":"3"}}]})
+        provider = DashScope(self.settings())
+        provider.client = httpx.AsyncClient(transport=httpx.MockTransport(handle))
+        try:
+            task = asyncio.create_task(provider.answer([{"role":"user","content":"old"}]))
+            await asyncio.wait_for(entered.wait(), 2)
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+            self.assertEqual(await provider.answer([{"role":"user","content":"new"}]), "3")
+        finally:
+            await provider.aclose()
 
     async def test_tts_run_continue_finish_and_clone_voice_share_one_contract(self):
         class Socket:
@@ -365,7 +391,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         return socket
 
     @unittest.skipUnless(NATIVE_OPUS, "Requires native libopus")
-    async def test_stream_releases_verified_chunk_before_tts_finishes_and_late_failure_no_commit(self):
+    async def test_stream_keeps_generated_text_before_tts_finishes_and_ack_does_not_duplicate(self):
         self.provider.tts_gate = asyncio.Event()
         socket = await self.client(streaming=True)
         await self.upload(socket, 1)
@@ -373,10 +399,10 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(any(m["type"] == "reply_end" for m in messages))
         self.assertEqual(messages[-1]["samples"], 4800 - 104)
         self.assertFalse(self.provider.tts_closed)
-        # An early or duplicate acknowledgement must not commit a partial reply.
+        # Generated text is already stored; playback acknowledgements never duplicate it.
         await socket.send('{"type":"playback_done","turn":1}')
         await self.drain(socket)
-        self.assertEqual(len(self.service.histories["aa:bb:cc:dd:ee:01"].pairs), 0)
+        self.assertEqual(list(self.service.histories["aa:bb:cc:dd:ee:01"].pairs), [("Q1", "A1")])
         self.provider.tts_gate.set()
         await self.until(socket, "reply_end")
         await socket.send('{"type":"playback_done","turn":1}')
@@ -384,7 +410,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(list(self.service.histories["aa:bb:cc:dd:ee:01"].pairs), [("Q1", "A1")])
 
     @unittest.skipUnless(NATIVE_OPUS, "Requires native libopus")
-    async def test_stream_abort_closes_upstream_and_new_turn_has_no_old_audio_or_memory(self):
+    async def test_stream_abort_closes_upstream_but_next_turn_remembers_full_generated_answer(self):
         self.provider.tts_gate = asyncio.Event()
         socket = await self.client(streaming=True)
         await self.upload(socket, 1)
@@ -399,7 +425,8 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         await socket.send('{"type":"playback_done","turn":1}')
         await socket.send('{"type":"playback_done","turn":2}')
         await self.drain(socket)
-        self.assertEqual(list(self.service.histories["aa:bb:cc:dd:ee:01"].pairs), [("Q2", "A2")])
+        self.assertEqual(list(self.service.histories["aa:bb:cc:dd:ee:01"].pairs), [("Q1", "A1"), ("Q2", "A2")])
+        self.assertEqual([m['content'] for m in self.provider.queries[-1]][1:], ['Q1', 'A1', 'Q2'])
 
     @unittest.skipUnless(NATIVE_OPUS, "Requires native libopus")
     async def test_stream_final_crc_exact_length_and_monotonic_checkpoints(self):
@@ -433,7 +460,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
                         break
 
     @unittest.skipUnless(NATIVE_OPUS, "Requires native libopus")
-    async def test_tts_failure_after_verified_audio_never_commits_and_next_turn_recovers(self):
+    async def test_tts_failure_retains_generated_answer_and_next_turn_recovers(self):
         self.provider.tts_gate = asyncio.Event()
         socket = await self.client(streaming=True)
         await self.upload(socket, 1)
@@ -447,14 +474,14 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(self.provider.tts_closed)
         await socket.send('{"type":"playback_done","turn":1}')
         await self.drain(socket)
-        self.assertEqual(len(self.service.histories['aa:bb:cc:dd:ee:01'].pairs), 0)
+        self.assertEqual(list(self.service.histories['aa:bb:cc:dd:ee:01'].pairs), [('Q1', 'A1')])
         self.provider.tts_fail = False
         self.provider.tts_gate = None
         await self.upload(socket, 2)
         await self.until(socket, 'reply_end')
         await socket.send('{"type":"playback_done","turn":2}')
         await self.drain(socket)
-        self.assertEqual(list(self.service.histories['aa:bb:cc:dd:ee:01'].pairs), [('Q2', 'A2')])
+        self.assertEqual(list(self.service.histories['aa:bb:cc:dd:ee:01'].pairs), [('Q1', 'A1'), ('Q2', 'A2')])
 
     async def start(self, socket, turn):
         await socket.send(json.dumps({"type": "listen", "state": "start", "mode": "manual", "turn": turn}))
@@ -486,15 +513,16 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         await self.until(socket, "pong")
 
     @unittest.skipUnless(NATIVE_OPUS, "Requires native libopus")
-    async def test_only_playback_confirmation_commits_and_window_slides_at_9_10(self):
+    async def test_generated_answers_slide_at_9_10_even_when_all_playbacks_aborted(self):
         socket = await self.client(streaming=True)
         for turn in range(1, 11):
             await self.upload(socket, turn)
             await self.until(socket, "reply_end")
             history = self.service.histories["aa:bb:cc:dd:ee:01"]
-            self.assertEqual(len(history.pairs), min(turn - 1, 8))
+            self.assertEqual(len(history.pairs), min(turn, 8))
             await socket.send(json.dumps({"type": "playback_done", "turn": turn}))
             await socket.send(json.dumps({"type": "playback_done", "turn": turn}))
+            await socket.send(json.dumps({"type": "abort", "turn": turn}))
             await self.drain(socket)
             self.assertEqual(len(history.pairs), min(turn, 8))
         self.assertEqual(self.provider.queries[8][1]["content"], "Q1")
@@ -525,7 +553,43 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         await self.start(socket, 2)
         await socket.send('{"type":"playback_done","turn":1}')
         await self.drain(socket)
-        self.assertEqual(len(self.service.histories["aa:bb:cc:dd:ee:01"].pairs), 0)
+        self.assertEqual(list(self.service.histories["aa:bb:cc:dd:ee:01"].pairs), [("Q1", "A1")])
+
+    async def test_abort_before_first_tts_audio_still_preserves_full_answer(self):
+        async def stalled_tts(text):
+            await asyncio.Future()
+            yield b''
+        self.provider.synthesize_stream = stalled_tts
+        socket = await self.client(streaming=True)
+        await self.upload(socket, 1)
+        await self.until(socket, 'reply_text')
+        await socket.send('{"type":"abort","turn":1}')
+        await self.drain(socket)
+        self.provider.synthesize_stream = FakeProvider.synthesize_stream.__get__(self.provider)
+        await self.upload(socket, 2)
+        await self.until(socket, 'reply_end')
+        self.assertEqual([m['content'] for m in self.provider.queries[-1]][1:], ['Q1', 'A1', 'Q2'])
+
+    async def test_late_llm_return_after_cancel_cannot_store_an_unfinished_old_turn(self):
+        started = asyncio.Event()
+        original_answer = self.provider.answer
+        async def answer(messages):
+            if messages[-1]['content'] == 'Q1':
+                started.set()
+                try:
+                    await asyncio.Future()
+                except asyncio.CancelledError:
+                    return 'late old result'
+            return await original_answer(messages)
+        self.provider.answer = answer
+        socket = await self.client()
+        await self.upload(socket, 1)
+        await asyncio.wait_for(started.wait(), 2)
+        # New listen.start also cancels, without requiring a separate abort.
+        await self.upload(socket, 2)
+        await self.until(socket, 'reply_end')
+        self.assertEqual(list(self.service.histories['aa:bb:cc:dd:ee:01'].pairs), [('Q2','A2')])
+        self.assertEqual(len(self.provider.queries[-1]), 2)
 
     async def test_empty_and_provider_failure_end_without_memory_commit(self):
         socket = await self.client()
@@ -591,7 +655,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
                         self.assertEqual(len(pcm), 9600)
                         break
 
-    async def test_reconnect_retains_only_completed_pairs_in_same_device_window(self):
+    async def test_reconnect_retains_generated_answers_including_unplayed_pair(self):
         socket = await self.client()
         await self.upload(socket, 1)
         await self.until(socket, "reply_end")
@@ -608,7 +672,7 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         await self.upload(again, 1)
         await self.until(again, "reply_end")
         self.assertEqual([m["content"] for m in self.provider.queries[-1]],
-                         [self.service.prompt, "Q1", "A1", "Q3"])
+                         [self.service.prompt, "Q1", "A1", "Q2", "A2", "Q3"])
 
 
 if __name__ == "__main__":

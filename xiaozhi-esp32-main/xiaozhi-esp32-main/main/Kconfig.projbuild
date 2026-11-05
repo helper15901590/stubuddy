@@ -62,6 +62,14 @@ config STUBUDDY_AI_PTT
         Negotiated ai/1 sessions over the verified WSS transport. ASR/LLM/TTS
         execute on the private server. The earlier echo/1 profiles remain independent.
 
+config STUBUDDY_AI_CONTROLS
+    bool "Enable stubuddy PTT volume controls and speech LED (checkpoint 4.2)"
+    depends on STUBUDDY_AI_PTT
+    default n
+    help
+        Negotiate restricted volume tools, persistent speech volume and DMA
+        playback LED metering. Remain PTT only, without VAD or generic MCP.
+
 config OTA_URL
     string "Default OTA URL"
     default "https://api.tenclass.net/xiaozhi/ota/"

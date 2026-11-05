@@ -10,8 +10,10 @@ inline constexpr size_t kAiPrebufferSamples = 4800;
 inline RecordingLevels AiStreamLevels(const int16_t* pcm, size_t samples) {
     auto levels = AnalyzeRecording(pcm, samples);
     // A silent/quiet TTS prefix must never mute or boost the entire answer.
-    // Fix one gain per turn, retaining ReplaySample's accepted 3% peak cap.
-    levels.gain = levels.peak >= 983 ? std::min(levels.gain, 0.1f) : 0.04f;
+    // Keep one gain per turn. Scale both prefix gain bounds with the output
+    // reference: normalize against 30% / 75% input rather than a legacy cap.
+    levels.gain = levels.peak >= kOutputPeakPcm16 ? std::min(levels.gain, kOutputPeakRatio / 0.30f)
+                                                  : kOutputPeakRatio / 0.75f;
     return levels;
 }
 

@@ -7,6 +7,7 @@ namespace stubuddy {
 class PlaybackInterrupt {
 public:
     constexpr explicit PlaybackInterrupt(bool pressed_at_start) : released_(!pressed_at_start) {}
+    constexpr bool released() const { return released_; }
 
     constexpr bool Update(bool pressed) {
         if (!pressed)

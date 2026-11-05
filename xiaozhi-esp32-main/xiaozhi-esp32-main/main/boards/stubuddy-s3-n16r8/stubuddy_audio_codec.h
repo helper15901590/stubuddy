@@ -1,6 +1,9 @@
 #pragma once
 
 #include "audio_codec.h"
+#ifdef CONFIG_STUBUDDY_AI_CONTROLS
+#include "speech_volume.h"
+#endif
 #ifdef CONFIG_STUBUDDY_OPUS_LOOPBACK
 #include <atomic>
 #endif
@@ -13,9 +16,21 @@ public:
     ~StubuddyAudioCodec() override;
     void Start() override;
     void EnableOutput(bool enable) override;
+    // Optional audio-owner poll while draining the tail. False cancels DMA.
+    bool FinishOutput(bool (*proceed)(void*) = nullptr, void* context = nullptr);
     void AbortOutput() override;
     void EnableInput(bool enable) override;
     bool HasOutputError() const override { return failed_; }
+#ifdef CONFIG_STUBUDDY_AI_CONTROLS
+    int SpeechVolume() const { return volume_state_.volume; }
+    esp_err_t RestoreSpeechVolume() { return SetSpeechVolume(volume_state_.audible); }
+    esp_err_t SetSpeechVolume(int volume);
+    void SelectSpeechOutput(bool speech);
+    void SetSpeechMeter(void (*callback)(void*, unsigned), void* context) {
+        meter_callback_ = callback;
+        meter_context_ = context;
+    }
+#endif
     bool HasInputError() const override {
 #ifdef CONFIG_STUBUDDY_OPUS_LOOPBACK
         return failed_ || rx_overflow_.load(std::memory_order_relaxed);
@@ -38,6 +53,15 @@ private:
     bool running_ = false;
     bool input_running_ = false;
     bool failed_ = false;
+#ifdef CONFIG_STUBUDDY_AI_CONTROLS
+    esp_err_t LoadSpeechVolume();
+    static bool IRAM_ATTR OnOutputSent(i2s_chan_handle_t, i2s_event_data_t*, void*);
+    stubuddy::SpeechVolumeState volume_state_;
+    bool volume_loaded_ = false;
+    std::atomic<bool> speech_output_{false};
+    void (*meter_callback_)(void*, unsigned) = nullptr;
+    void* meter_context_ = nullptr;
+#endif
 #ifdef CONFIG_STUBUDDY_OPUS_LOOPBACK
     // An encoder stall must never silently turn dropped DMA data into a pass.
     std::atomic<bool> rx_overflow_{false};

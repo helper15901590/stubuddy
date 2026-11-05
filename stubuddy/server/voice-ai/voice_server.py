@@ -23,6 +23,7 @@ from echo_protocol import AUDIO_PARAMS, MAX_MESSAGE, ProtocolError, Recording, c
 from audio import decode, encode, StreamEncoder, REPLY_PACKET_LIMIT
 from history import History
 from providers import DashScope, PROMPT, ProviderFailure
+from device_tools import answer_with_tools, GET, SET, result_volume, volume_intent, volume_speech_text
 
 LOG = logging.getLogger("stubuddy.ai")
 PATH = "/stubuddy/ai"
@@ -84,9 +85,11 @@ class VoiceService:
         high_turn = 0
         current = None
         task = None
-        pending = None
         active_turn = 0
         streaming = False
+        device_controls = False
+        volume_restore = False
+        tool_waiter = None
         send_lock = asyncio.Lock()
 
         async def send(message, turn=0):
@@ -101,24 +104,45 @@ class VoiceService:
                 await socket.send(message)
 
         async def cancel():
-            nonlocal task, pending
-            pending = None
+            nonlocal task
             if task:
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError, ConnectionClosed):
                     await task
                 task = None
 
+        async def device_tool(turn, name, values):
+            nonlocal tool_waiter
+            if not device_controls or active_turn != turn or tool_waiter is not None:
+                raise ValueError("Device tool unavailable")
+            call_id = secrets.token_hex(8)
+            future = asyncio.get_running_loop().create_future()
+            tool_waiter = (turn, call_id, future)
+            try:
+                await send({"type": "stage", "state": "tools"}, turn)
+                await send({"type": "device_tool", "call_id": call_id, "name": name, **values}, turn)
+                result = await asyncio.wait_for(future, 5)
+                result_volume(result)
+                LOG.info("TOOL CONFIRMED session=%s turn=%s name=%s volume=%s", session, turn, name, result["volume"])
+                return result
+            finally:
+                if not future.done():
+                    future.cancel()
+                tool_waiter = None
+
         async def respond(recording, metadata):
-            nonlocal pending
             turn = recording.turn
             stage = "asr"
+            started = time.monotonic()
             try:
                 async with asyncio.timeout(90):
                     async with self.slots:
+                        admitted = time.monotonic()
                         await send({"type": "stage", "state": stage}, turn)
                         pcm = await asyncio.to_thread(self.decode, recording.packets, metadata["samples"], metadata["delay"])
+                        decoded_at = time.monotonic()
                         query = await self.provider.recognize(pcm)
+                        recognized_at = time.monotonic()
                         del pcm
                         if not query:
                             await send({"type": "turn_empty"}, turn)
@@ -130,14 +154,35 @@ class VoiceService:
                         await send({"type": "stt", "text": shown}, turn)
                         stage = "llm"
                         await send({"type": "stage", "state": stage}, turn)
-                        answer = await self.provider.answer(history.messages(self.prompt, query))
+                        messages = history.messages(self.prompt, query)
+                        LOG.info("ROUTE session=%s turn=%s domain=%s history_completed=%s current_is_extra=true",
+                                 session, turn, "volume" if device_controls and volume_intent(query, messages) else "chat", len(history.pairs))
+                        if device_controls:
+                            if volume_intent(query, messages): stage = "tools"
+                            answer = await answer_with_tools(self.provider, messages,
+                                lambda name, values: device_tool(turn, name, values), volume_restore)
+                        else:
+                            answer = await self.provider.answer(messages)
+                        if active_turn != turn:
+                            return
+                        # A completed answer belongs to the conversation even if
+                        # its audio is interrupted, fails, or the device reconnects.
+                        # No await between the active-turn check and single commit.
+                        history.commit(query, answer)
+                        LOG.info("HISTORY COMMIT session=%s turn=%s stored_rounds=%s reason=answer_ready",
+                                 session, turn, len(history.pairs))
+                        answered_at = time.monotonic()
+                        LOG.info("TIMING session=%s turn=%s queue_ms=%s decode_ms=%s asr_ms=%s llm_tools_ms=%s answer_chars=%s",
+                                 session, turn, round((admitted-started)*1000), round((decoded_at-admitted)*1000),
+                                 round((recognized_at-decoded_at)*1000), round((answered_at-recognized_at)*1000), len(answer))
                         await send({"type": "reply_text", "text": answer}, turn)
                         stage = "tts"
                         await send({"type": "stage", "state": stage}, turn)
+                        speech_text = volume_speech_text(answer)
                         if streaming:
-                            await stream_reply(turn, query, answer)
+                            await stream_reply(turn, query, speech_text, started)
                             return
-                        pcm = await self.provider.synthesize(answer)
+                        pcm = await self.provider.synthesize(speech_text)
                         # The common metadata has a 300ms lower limit.
                         if len(pcm) < 9600:
                             pcm += bytes(9600 - len(pcm))
@@ -156,7 +201,6 @@ class VoiceService:
                             validation.append(index, packet)
                         validation.finish(reply)
                         validation.clear()
-                        pending = (turn, query, answer)
                         await send({"type": "reply_start", **reply}, turn)
                         for index, packet in enumerate(packets):
                             if active_turn != turn:
@@ -171,7 +215,6 @@ class VoiceService:
             except ConnectionClosed:
                 pass
             except Exception as error:
-                pending = None
                 # Exception text can contain upstream secrets; log only its class.
                 diagnostic = error.code if isinstance(error, ProviderFailure) else type(error).__name__
                 LOG.warning("TURN FAILED session=%s turn=%s stage=%s kind=%s", session, turn, stage, diagnostic)
@@ -179,8 +222,7 @@ class VoiceService:
             finally:
                 recording.clear()
 
-        async def stream_reply(turn, query, answer):
-            nonlocal pending
+        async def stream_reply(turn, query, answer, turn_started):
             encoder = StreamEncoder()
             reply = {"turn": turn, "samples": 0, "delay": encoder.delay,
                      "frames": 0, "bytes": 0, "crc32": 0}
@@ -208,8 +250,8 @@ class VoiceService:
                         await send({"type": "reply_chunk", **reply}, turn)
                         if first_audio is None:
                             first_audio = time.monotonic()
-                            LOG.info("STREAM FIRST session=%s turn=%s tts_ms=%s", session, turn,
-                                     round((first_audio - started) * 1000))
+                            LOG.info("STREAM FIRST session=%s turn=%s tts_ms=%s server_first_ms=%s", session, turn,
+                                     round((first_audio - started) * 1000), round((first_audio-turn_started)*1000))
                     await asyncio.sleep(0)
 
             async with contextlib.aclosing(self.provider.synthesize_stream(answer)) as chunks:
@@ -218,7 +260,6 @@ class VoiceService:
                     await forward(packets)
             await forward(await asyncio.to_thread(encoder.finish))
             reply["samples"] = encoder.samples
-            pending = (turn, query, answer)
             await send({"type": "reply_end", **reply}, turn)
             LOG.info("STREAM END session=%s turn=%s samples=%s frames=%s max_packet=%s tts_ms=%s; waiting for playback confirmation",
                      session, turn, reply["samples"], reply["frames"], max_packet,
@@ -237,9 +278,19 @@ class VoiceService:
                         hello["max_reply_packet_bytes"] != REPLY_PACKET_LIMIT):
                     raise ProtocolError("Invalid reply stream negotiation")
                 streaming = True
+            if "device_controls" in hello:
+                if not streaming or type(hello["device_controls"]) is not int or hello["device_controls"] != 1:
+                    raise ProtocolError("Invalid device tool negotiation")
+                device_controls = True
+            if "volume_restore" in hello:
+                if not device_controls or type(hello["volume_restore"]) is not int or hello["volume_restore"] != 1:
+                    raise ProtocolError("Invalid volume restore capability")
+                volume_restore = True
             await send({"type": "hello", "transport": "websocket", "ai_protocol": 1,
                         "audio_params": AUDIO_PARAMS, **({"reply_stream": 1,
-                        "max_reply_packet_bytes": REPLY_PACKET_LIMIT} if streaming else {})})
+                        "max_reply_packet_bytes": REPLY_PACKET_LIMIT} if streaming else {}),
+                        **({"device_controls": 1} if device_controls else {}),
+                        **({"volume_restore": 1} if volume_restore else {})})
             LOG.info("READY session=%s history=%s completed rounds; current input is extra", session, self.rounds)
             while True:
                 raw = await asyncio.wait_for(socket.recv(), 90)
@@ -259,6 +310,14 @@ class VoiceService:
                 if type(turn) is not int or not 1 <= turn <= 0xFFFFFFFF:
                     raise ProtocolError("Invalid turn")
                 kind = message["type"]
+                if kind == "tool_result":
+                    if (tool_waiter and tool_waiter[0] == turn and active_turn == turn and
+                            message.get("call_id") == tool_waiter[1]):
+                        if message.get("session_id") != session or type(message.get("ok")) is not bool:
+                            raise ProtocolError("Invalid tool result")
+                        if not tool_waiter[2].done():
+                            tool_waiter[2].set_result({"ok": message["ok"], "volume": message.get("volume")})
+                    continue  # Stale/duplicate acknowledgements cannot mutate state or history.
                 if kind == "listen" and message.get("state") == "start":
                     if turn <= high_turn or message.get("mode") != "manual":
                         raise ProtocolError("Invalid start")
@@ -276,10 +335,8 @@ class VoiceService:
                             current.clear()
                             current = None
                 elif kind == "playback_done":
-                    if pending and pending[0] == turn and active_turn == turn:
-                        history.commit(pending[1], pending[2])
-                        pending = None
-                        LOG.info("HISTORY COMMIT session=%s turn=%s stored_rounds=%s", session, turn, len(history.pairs))
+                    if active_turn == turn:
+                        LOG.info("PLAYBACK DONE session=%s turn=%s; history already stored", session, turn)
                 elif kind == "listen" and message.get("state") == "stop":
                     if current is None or current.turn != turn:
                         if turn < high_turn:
@@ -302,7 +359,7 @@ class VoiceService:
             if current:
                 current.clear()
             self.connected.discard(device)
-            LOG.info("CLOSED session=%s; unfinished turn discarded", session)
+            LOG.info("CLOSED session=%s; unfinished generation cancelled; generated history retained", session)
 
     def server(self, host="127.0.0.1", port=8766):
         return serve(self.handle, host, port, process_request=self.authenticate,
@@ -313,9 +370,12 @@ class VoiceService:
 
 async def main(settings):
     service = VoiceService(settings)
-    async with service.server():
-        LOG.info("LISTEN 127.0.0.1:8766%s; DashScope; verified upstream TLS; no credentials logged", PATH)
-        await asyncio.Future()
+    try:
+        async with service.server():
+            LOG.info("LISTEN 127.0.0.1:8766%s; DashScope; verified upstream TLS; no credentials logged", PATH)
+            await asyncio.Future()
+    finally:
+        await service.provider.aclose()
 
 
 if __name__ == "__main__":

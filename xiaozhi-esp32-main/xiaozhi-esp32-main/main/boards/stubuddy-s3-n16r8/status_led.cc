@@ -62,6 +62,9 @@ void StatusLed::SetState(LedState state) {
         state_ = state;
         ++generation_;
         epoch_ms_ = NowMs();
+#ifdef CONFIG_STUBUDDY_AI_CONTROLS
+        meter_power_ = 0;
+#endif
         changed = true;
     }
     portEXIT_CRITICAL(&mutex_);
@@ -78,6 +81,9 @@ void StatusLed::SetNetworkState(NetworkLedState state) {
         state_ = effective;
         ++generation_;
         epoch_ms_ = NowMs();
+#ifdef CONFIG_STUBUDDY_AI_CONTROLS
+        meter_power_ = 0;
+#endif
         changed = true;
     }
     portEXIT_CRITICAL(&mutex_);
@@ -105,13 +111,36 @@ esp_err_t StatusLed::ShowCaptureStopped(unsigned minimum_off_ms) {
 
 void StatusLed::OnTick(void* context) { static_cast<StatusLed*>(context)->UpdateOutput(); }
 
+#ifdef CONFIG_STUBUDDY_AI_CONTROLS
+void StatusLed::PublishPlaybackPower(unsigned power) {
+    portENTER_CRITICAL_ISR(&mutex_);
+    if (state_ == LedState::SpeechPlayback && power > meter_power_)
+        meter_power_ = power;
+    portEXIT_CRITICAL_ISR(&mutex_);
+}
+#endif
+
 void StatusLed::UpdateOutput() {
     portENTER_CRITICAL(&mutex_);
     const LedState state = state_;
     const unsigned generation = generation_;
     const unsigned elapsed = NowMs() - epoch_ms_;
+#ifdef CONFIG_STUBUDDY_AI_CONTROLS
+    const unsigned power = meter_power_;
+    meter_power_ = 0;
+#endif
     portEXIT_CRITICAL(&mutex_);
-    const unsigned duty = LedBrightness(state, elapsed);
+    unsigned duty = LedBrightness(state, elapsed);
+#ifdef CONFIG_STUBUDDY_AI_CONTROLS
+    if (generation != envelope_generation_) {
+        envelope_.Reset();
+        envelope_generation_ = generation;
+    }
+    if (state == LedState::SpeechPlayback)
+        duty = envelope_.Update(power);
+    else if (state == LedState::ModelWaiting)
+        duty = UniformBreath(elapsed);
+#endif
     esp_err_t result = ESP_OK;
     // No audio locks, sleeps, fades or allocations in the shared timer task.
     if (duty != last_duty_) {

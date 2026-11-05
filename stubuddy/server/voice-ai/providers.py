@@ -75,21 +75,40 @@ class DashScope:
         self.wss = endpoint(settings["tts_ws_url"], True)
         self.model, self.voice, self.rate = voice_settings(settings)
         self.headers = {"Authorization": "Bearer " + self.key}
+        self.client = None
+
+    async def aclose(self):
+        if self.client is not None:
+            await self.client.aclose()
+            self.client = None
+
+    async def completion_message(self, body, timeout=30):
+        # Bound the shared pool; cancelling a request still cancels its HTTP I/O.
+        if self.client is None:
+            self.client = httpx.AsyncClient(follow_redirects=False, trust_env=False,
+                limits=httpx.Limits(max_connections=4, max_keepalive_connections=4, keepalive_expiry=30))
+        response = await self.client.post(self.base + "/chat/completions", headers=self.headers,
+                                         json=body, timeout=httpx.Timeout(timeout, connect=10))
+        if response.status_code != 200:
+            # Never log response bodies, headers or exceptions containing request data.
+            raise ProviderFailure("http_" + str(response.status_code))
+        message = response.json()["choices"][0]["message"]
+        if not isinstance(message, dict):
+            raise ValueError("Invalid completion message")
+        return message
 
     async def completion(self, body, timeout=30):
-        # Client lives inside the cancellable turn. Cancellation closes the connection.
-        async with httpx.AsyncClient(timeout=httpx.Timeout(timeout, connect=10),
-                                     follow_redirects=False, trust_env=False) as client:
-            response = await client.post(self.base + "/chat/completions", headers=self.headers, json=body)
-            if response.status_code != 200:
-                # Never log response bodies, headers or exceptions containing request data.
-                raise ProviderFailure("http_" + str(response.status_code))
-            content = response.json()["choices"][0]["message"]["content"]
-            if isinstance(content, list):
-                content = "".join(part.get("text", "") for part in content if isinstance(part, dict))
-            if not isinstance(content, str):
-                raise RuntimeError("DashScope returned invalid text")
-            return content.strip()
+        message = await self.completion_message(body, timeout)
+        return self.content_text(message)
+
+    @staticmethod
+    def content_text(message):
+        content = message.get("content")
+        if isinstance(content, list):
+            content = "".join(part.get("text", "") for part in content if isinstance(part, dict))
+        if not isinstance(content, str):
+            raise RuntimeError("DashScope returned invalid text")
+        return content.strip()
 
     async def recognize(self, pcm):
         audio = "data:audio/wav;base64," + base64.b64encode(wav_bytes(pcm)).decode("ascii")
@@ -101,6 +120,10 @@ class DashScope:
         text = await self.completion({"model": self.settings.get("llm_model", "qwen-plus"),
             "messages": messages, "stream": False, "enable_thinking": False,
             "temperature": 0.5, "max_tokens": 256})
+        return self.answer_text({"content": text})
+
+    def answer_text(self, message):
+        text = self.content_text(message)
         if not text:
             raise RuntimeError("Empty model answer")
         # Bound reply duration even if the model ignores the short-answer prompt.

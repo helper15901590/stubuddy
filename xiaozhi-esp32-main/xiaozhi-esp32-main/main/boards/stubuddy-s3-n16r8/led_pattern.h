@@ -7,6 +7,7 @@ enum class LedState {
     CaptureStopped,
     Recording,
     Playback,
+    SpeechPlayback,
     ModelWaiting,
     WifiSetup,
     WifiConnecting,
@@ -38,7 +39,7 @@ constexpr LedState EffectiveLedState(LedState audio, NetworkLedState network) {
         network == NetworkLedState::Fault)
         return LedState::Error;
     if (audio == LedState::Recording || audio == LedState::Playback ||
-        audio == LedState::CaptureStopped)
+        audio == LedState::SpeechPlayback || audio == LedState::CaptureStopped)
         return audio;
     if (network == NetworkLedState::Setup)
         return LedState::WifiSetup;
@@ -54,6 +55,7 @@ constexpr unsigned LedBrightness(LedState state, unsigned elapsed_ms) {
     switch (state) {
         case LedState::Idle:
         case LedState::CaptureStopped:
+        case LedState::SpeechPlayback:  // Dynamic brightness supplied by the audio meter.
             return 0;
         case LedState::Recording:
         case LedState::Playback:
@@ -83,6 +85,8 @@ constexpr const char* LedStateName(LedState state) {
             return "RECORDING/ON";
         case LedState::Playback:
             return "PLAYBACK/ON";
+        case LedState::SpeechPlayback:
+            return "AI_PLAYBACK/ENVELOPE";
         case LedState::ModelWaiting:
             return "MODEL_WAITING/BREATH";
         case LedState::WifiSetup:

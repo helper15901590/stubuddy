@@ -6,6 +6,10 @@
 #include <freertos/task.h>
 #include <algorithm>
 #include <array>
+#ifdef CONFIG_STUBUDDY_AI_CONTROLS
+#include <nvs.h>
+#include <nvs_flash.h>
+#endif
 
 namespace {
 constexpr char kTag[] = "STUBUDDY_CODEC";
@@ -41,7 +45,15 @@ esp_err_t StubuddyAudioCodec::Initialize() {
     config.gpio_cfg.ws = stubuddy::kSpeakerLrclk;
     config.gpio_cfg.dout = stubuddy::kSpeakerData;
     config.gpio_cfg.din = I2S_GPIO_UNUSED;
-    return i2s_channel_init_std_mode(tx_handle_, &config);
+    result = i2s_channel_init_std_mode(tx_handle_, &config);
+#ifdef CONFIG_STUBUDDY_AI_CONTROLS
+    if (result == ESP_OK) {
+        i2s_event_callbacks_t callbacks = {};
+        callbacks.on_sent = OnOutputSent;
+        result = i2s_channel_register_event_callback(tx_handle_, &callbacks, this);
+    }
+#endif
+    return result;
 }
 
 void StubuddyAudioCodec::Start() {
@@ -49,12 +61,105 @@ void StubuddyAudioCodec::Start() {
         return;
     // Fixed diagnostic level. Do not read or overwrite persisted user volume.
     output_volume_ = 100;
+#ifdef CONFIG_STUBUDDY_AI_CONTROLS
+    const auto volume_result = LoadSpeechVolume();
+    if (volume_result != ESP_OK) {
+        Fail(volume_result, "load speech volume");
+        return;
+    }
+    output_volume_ = speech_output_.load() ? volume_state_.volume : 100;
+#endif
     const esp_err_t result = Initialize();
     if (result != ESP_OK)
         Fail(result, "initialize I2S1");
     else
         ESP_LOGI(kTag, "AudioCodec ready: I2S1, 16000 Hz, 32-bit stereo; LEFT=0, RIGHT=PCM");
 }
+
+#ifdef CONFIG_STUBUDDY_AI_CONTROLS
+esp_err_t StubuddyAudioCodec::LoadSpeechVolume() {
+    if (volume_loaded_)
+        return ESP_OK;
+    // Startup audio precedes Wi-Fi's NVS initialization. Preserve NVS on all
+    // errors; never erase saved networks to recover an audio setting.
+    const auto initialized = nvs_flash_init();
+    if (initialized != ESP_OK)
+        return initialized;
+    nvs_handle_t handle = 0;
+    auto result = nvs_open("stubuddy_audio", NVS_READONLY, &handle);
+    int32_t value = 100;
+    if (result == ESP_ERR_NVS_NOT_FOUND)
+        result = ESP_OK;
+    else if (result == ESP_OK) {
+        size_t size = sizeof(volume_state_);
+        result = nvs_get_blob(handle, "speech_state", &volume_state_, &size);
+        if (result == ESP_ERR_NVS_NOT_FOUND) {
+            result = nvs_get_i32(handle, "speech_volume", &value);
+            if (result == ESP_ERR_NVS_NOT_FOUND)
+                result = ESP_OK;
+            volume_state_ = stubuddy::SpeechVolumeState::Legacy(value);
+        } else if (result == ESP_OK && size != sizeof(volume_state_)) {
+            result = ESP_ERR_INVALID_SIZE;
+        }
+        nvs_close(handle);
+    }
+    if (result != ESP_OK)
+        return result;
+    if (!volume_state_.Valid())
+        return ESP_ERR_INVALID_STATE;
+    volume_loaded_ = true;
+    ESP_LOGI(kTag, "SPEECH VOLUME loaded=%d restore=%d; cues fixed; NVS layout retained",
+             int(volume_state_.volume), int(volume_state_.audible));
+    return ESP_OK;
+}
+
+esp_err_t StubuddyAudioCodec::SetSpeechVolume(int volume) {
+    if (volume < 0 || volume > 100)
+        return ESP_ERR_INVALID_ARG;
+    if (volume == volume_state_.volume)
+        return ESP_OK;
+    nvs_handle_t handle = 0;
+    auto result = nvs_open("stubuddy_audio", NVS_READWRITE, &handle);
+    if (result != ESP_OK)
+        return result;
+    const auto next = volume_state_.WithVolume(volume);
+    result = nvs_set_blob(handle, "speech_state", &next, sizeof(next));
+    if (result == ESP_OK)
+        result = nvs_commit(handle);
+    nvs_close(handle);
+    if (result != ESP_OK)
+        return result;
+    volume_state_ = next;
+    if (speech_output_.load())
+        output_volume_ = volume;
+    ESP_LOGI(kTag, "SPEECH VOLUME saved=%d", volume);
+    return ESP_OK;
+}
+
+void StubuddyAudioCodec::SelectSpeechOutput(bool speech) {
+    speech_output_.store(speech);
+    output_volume_ = speech ? volume_state_.volume : 100;
+}
+
+bool StubuddyAudioCodec::OnOutputSent(i2s_chan_handle_t, i2s_event_data_t* event, void* context) {
+    auto& codec = *static_cast<StubuddyAudioCodec*>(context);
+    if (!codec.speech_output_.load(std::memory_order_relaxed) || !codec.meter_callback_ || !event ||
+        !event->dma_buf || !event->size)
+        return false;
+    const auto* slots = static_cast<const int32_t*>(event->dma_buf);
+    const size_t frames = event->size / (2 * sizeof(int32_t));
+    uint64_t power = 0;
+    for (size_t i = 0; i < frames; ++i) {
+        const int64_t pcm = slots[2 * i + 1] / 65536;
+        power += pcm * pcm;
+    }
+    // Only publish integer power from the completed DMA buffer. The LED timer
+    // owns smoothing/PWM; no floating point, allocation, logging or wait in ISR.
+    if (frames)
+        codec.meter_callback_(codec.meter_context_, unsigned(power / frames));
+    return false;
+}
+#endif
 
 void StubuddyAudioCodec::EnableInput(bool enable) {
     if (!enable) {
@@ -175,25 +280,56 @@ esp_err_t StubuddyAudioCodec::WriteSilence(unsigned duration_ms) {
     return ESP_OK;
 }
 
+bool StubuddyAudioCodec::FinishOutput(bool (*proceed)(void*), void* context) {
+    const auto cancelled = [&]() {
+        if (proceed && !proceed(context)) {
+            AbortOutput();
+            return true;
+        }
+        return false;
+    };
+    esp_err_t result = ESP_OK;
+    if (running_) {
+        if (!proceed) {
+            result = WriteSilence(150);
+        }
+        const StereoBlock silence = {};
+        unsigned remaining = proceed ? 150 * (stubuddy::kSampleRate / 1000) : 0;
+        while (remaining && result == ESP_OK) {
+            if (cancelled())
+                return false;
+            const unsigned frames = std::min(remaining, stubuddy::kFramesPerBlock);
+            result = WriteSlots(silence.data(), frames);
+            remaining -= frames;
+        }
+        constexpr unsigned drain_ms =
+            (stubuddy::kDmaDescriptors * stubuddy::kFramesPerBlock * 1000 + stubuddy::kSampleRate -
+             1) /
+                stubuddy::kSampleRate +
+            20;
+        if (!proceed && result == ESP_OK)
+            vTaskDelay(pdMS_TO_TICKS(drain_ms));
+        for (unsigned elapsed = 0; proceed && result == ESP_OK && elapsed < drain_ms;) {
+            if (cancelled())
+                return false;
+            const unsigned step = std::min(5U, drain_ms - elapsed);
+            vTaskDelay(std::max<TickType_t>(1, pdMS_TO_TICKS(step)));
+            elapsed += step;
+        }
+    }
+    if (cancelled())
+        return false;
+    const esp_err_t shutdown = Shutdown();
+    if (result != ESP_OK || shutdown != ESP_OK)
+        Fail(result != ESP_OK ? result : shutdown, "stop output");
+    else
+        ESP_LOGI(kTag, "OUTPUT OFF: CTRL=LOW; I2S1 released");
+    return !failed_;
+}
+
 void StubuddyAudioCodec::EnableOutput(bool enable) {
     if (!enable) {
-        esp_err_t result = ESP_OK;
-        if (running_) {
-            result = WriteSilence(150);
-            if (result == ESP_OK) {
-                constexpr unsigned drain_ms =
-                    (stubuddy::kDmaDescriptors * stubuddy::kFramesPerBlock * 1000 +
-                     stubuddy::kSampleRate - 1) /
-                        stubuddy::kSampleRate +
-                    20;
-                vTaskDelay(pdMS_TO_TICKS(drain_ms));
-            }
-        }
-        const esp_err_t shutdown = Shutdown();
-        if (result != ESP_OK || shutdown != ESP_OK)
-            Fail(result != ESP_OK ? result : shutdown, "stop output");
-        else
-            ESP_LOGI(kTag, "OUTPUT OFF: CTRL=LOW; I2S1 released");
+        FinishOutput();
         return;
     }
     if (output_enabled_ || failed_)

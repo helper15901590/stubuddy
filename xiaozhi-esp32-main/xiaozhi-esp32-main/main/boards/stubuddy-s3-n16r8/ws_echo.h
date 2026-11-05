@@ -1,7 +1,11 @@
 #pragma once
 
+#include "clock_age.h"
 #include "echo_protocol.h"
 #include "wifi_setup.h"
+#ifdef CONFIG_STUBUDDY_AI_CONTROLS
+#include "device_controls.h"
+#endif
 
 #include <esp_websocket_client.h>
 #include <cJSON.h>
@@ -33,17 +37,26 @@ public:
     bool ReadStreamPacket(size_t& cursor, size_t index, uint8_t* packet, size_t& size,
                           echo::Metadata& verified, bool& complete);
 #endif
-    unsigned progress_at() const { return progress_at_.load(); }
-    void Timeout();
+    unsigned ProgressAgeMs() const;
+    void Timeout(const char* reason, unsigned elapsed_ms, unsigned limit_ms);
+    void RejectReply(const char* reason) { Fault(reason); }
+#ifdef CONFIG_STUBUDDY_AI_CONTROLS
+    bool TakeVolumeRequest(VolumeRequest& request);
+    void CompleteVolumeRequest(const VolumeResult& result);
+#endif
 
 private:
-    enum class Kind { Start, Audio, Stop, Abort, Played };
+    enum class Kind { Start, Audio, Stop, Abort, Played, ToolResult };
     struct Command {
         Kind kind = Kind::Start;
         unsigned turn = 0, epoch = 0;
         echo::Metadata metadata;
         size_t size = 0;
         uint8_t payload[kOpusMaxPacketBytes] = {};
+#ifdef CONFIG_STUBUDDY_AI_CONTROLS
+        VolumeResult tool;
+        std::array<char, 17> session{};
+#endif
     };
     static constexpr unsigned kQueueDepth = 8;
     static void WorkerEntry(void* context);
@@ -75,6 +88,12 @@ private:
 #ifdef CONFIG_STUBUDDY_AI_PTT
     std::atomic<bool> empty_{false};
     std::array<char, 33> session_id_{};
+#endif
+#ifdef CONFIG_STUBUDDY_AI_CONTROLS
+    VolumeMailbox tools_;
+    bool awaiting_tools_ = false;
+    Command tool_reply_;  // Mutex-owned staging; no 4KiB WS callback stack allocation.
+    void QueueVolumeResult(const VolumeResult& result);
 #endif
 };
 }  // namespace stubuddy

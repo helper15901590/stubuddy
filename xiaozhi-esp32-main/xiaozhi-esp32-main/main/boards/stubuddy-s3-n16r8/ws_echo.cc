@@ -51,6 +51,11 @@ namespace echo_settings = echo_local;
 #endif
 namespace {
 constexpr char kTag[] = "STUBUDDY_WS";
+#ifdef CONFIG_STUBUDDY_AI_CONTROLS
+constexpr unsigned kSendTimeoutMs = 2000;
+#else
+constexpr unsigned kSendTimeoutMs = 500;
+#endif
 unsigned Now() { return static_cast<unsigned>(esp_timer_get_time() / 1000); }
 bool UInt(const cJSON* root, const char* name, uint32_t& value) {
     const cJSON* item = cJSON_GetObjectItemCaseSensitive(root, name);
@@ -130,7 +135,7 @@ esp_err_t WsEcho::Start(WifiSetup& wifi, OpusPacketStore& received, size_t packe
 
 bool WsEcho::ready() const {
     return ready_.load() && connected_.load() && wifi_ && wifi_->online() &&
-           wifi_epoch_.load() == wifi_->link_epoch() && Now() - last_rx_.load() < 20000;
+           wifi_epoch_.load() == wifi_->link_epoch() && SnapshotAgeMs(last_rx_, Now) < 20000;
 }
 
 void WsEcho::Fault(const char* reason) {
@@ -142,9 +147,12 @@ void WsEcho::Fault(const char* reason) {
         fault_notice_.store(true);
 }
 
-void WsEcho::Timeout() {
-    ESP_LOGW(kTag, "ECHO TIMEOUT: no progress; round cancelled");
-    Fault();
+unsigned WsEcho::ProgressAgeMs() const { return SnapshotAgeMs(progress_at_, Now); }
+
+void WsEcho::Timeout(const char* reason, unsigned elapsed_ms, unsigned limit_ms) {
+    ESP_LOGW(kTag, "ROUND TIMEOUT: turn=%u reason=%s elapsed_ms=%u limit_ms=%u",
+             active_turn_.load(), reason, elapsed_ms, limit_ms);
+    Fault(reason);
 }
 
 bool WsEcho::Enqueue(const Command& command) {
@@ -216,6 +224,9 @@ bool WsEcho::Finish(size_t samples, size_t delay, size_t frames) {
     }
     xSemaphoreTake(rx_mutex_, portMAX_DELAY);
     expected_ = uploaded_;
+#ifdef CONFIG_STUBUDDY_AI_CONTROLS
+    awaiting_tools_ = true;
+#endif
     received_->Reset();
     received_frames_ = received_bytes_ = received_crc_ = 0;
     accepting_ = false;
@@ -234,6 +245,10 @@ void WsEcho::Cancel() {
         return;
     xSemaphoreTake(rx_mutex_, portMAX_DELAY);
     const unsigned old = active_turn_.exchange(0);
+#ifdef CONFIG_STUBUDDY_AI_CONTROLS
+    tools_.Reset();
+    awaiting_tools_ = false;
+#endif
     accepting_ = false;
     done_.store(false);
     received_->Reset();
@@ -270,6 +285,33 @@ void WsEcho::PlaybackDone() {
     command.epoch = epoch();
     if (command.turn)
         Enqueue(command);
+}
+#endif
+
+#ifdef CONFIG_STUBUDDY_AI_CONTROLS
+bool WsEcho::TakeVolumeRequest(VolumeRequest& request) {
+    xSemaphoreTake(rx_mutex_, portMAX_DELAY);
+    const bool take = awaiting_tools_ && ready() && !round_failed() && tools_.Take(request);
+    xSemaphoreGive(rx_mutex_);
+    return take;
+}
+
+void WsEcho::QueueVolumeResult(const VolumeResult& result) {
+    auto& command = tool_reply_;
+    command.kind = Kind::ToolResult;
+    command.turn = result.request.turn;
+    command.epoch = epoch();
+    command.tool = result;
+    std::memcpy(command.session.data(), session_id_.data(), 16);
+    command.session[16] = 0;  // Hello validates the exact 16-byte session identifier.
+    Enqueue(command);
+}
+
+void WsEcho::CompleteVolumeRequest(const VolumeResult& result) {
+    xSemaphoreTake(rx_mutex_, portMAX_DELAY);
+    if (result.request.turn == active_turn_.load() && ready() && tools_.Complete(result))
+        QueueVolumeResult(result);
+    xSemaphoreGive(rx_mutex_);
 }
 #endif
 
@@ -361,6 +403,21 @@ void WsEcho::OnMessage(unsigned opcode, const uint8_t* data, size_t size) {
                 return;
             }
             std::snprintf(session_id_.data(), session_id_.size(), "%s", session->valuestring);
+#ifdef CONFIG_STUBUDDY_AI_CONTROLS
+            uint32_t controls = 0;
+            if (!UInt(root, "device_controls", controls) || controls != 1) {
+                cJSON_Delete(root);
+                Fault("server_missing_device_controls_update_server_first");
+                return;
+            }
+            uint32_t restore = 0;
+            if (!UInt(root, "volume_restore", restore) || restore != 1) {
+                cJSON_Delete(root);
+                Fault("server_missing_volume_restore_update_server_first");
+                return;
+            }
+            ESP_LOGI(kTag, "DEVICE CONTROLS READY: volume_restore=1; restricted tools v1");
+#endif
 #endif
             wifi_epoch_.store(wifi_->link_epoch());
             last_rx_.store(Now());
@@ -395,9 +452,46 @@ void WsEcho::OnMessage(unsigned opcode, const uint8_t* data, size_t size) {
             Fault();
             return;
         }
+#ifdef CONFIG_STUBUDDY_AI_CONTROLS
+        if (Text(root, "type", "device_tool")) {
+            const auto* id = cJSON_GetObjectItemCaseSensitive(root, "call_id");
+            const bool set = Text(root, "name", "self.audio_speaker.set_volume");
+            const bool restore = Text(root, "name", "self.audio_speaker.restore_volume");
+            uint32_t volume = 0;
+            if (!awaiting_tools_ || !cJSON_IsString(id) || std::strlen(id->valuestring) != 16 ||
+                std::strspn(id->valuestring, "0123456789abcdef") != 16 ||
+                (!set && !restore && !Text(root, "name", "self.get_device_status")) ||
+                (set && (!UInt(root, "volume", volume) || volume > 100))) {
+                cJSON_Delete(root);
+                Fault("invalid_device_tool");
+                return;
+            }
+            VolumeRequest request;
+            request.turn = turn;
+            std::snprintf(request.id.data(), request.id.size(), "%s", id->valuestring);
+            request.set = set;
+            request.restore = restore;
+            request.volume = set ? int(volume) : -1;
+            VolumeResult cached;
+            const auto arrival = tools_.Receive(request, cached);
+            if (arrival == VolumeMailbox::Arrival::Invalid ||
+                (accepting_ && arrival == VolumeMailbox::Arrival::New))
+                Fault("device_tool_limit_or_id_reuse");
+            else if (arrival == VolumeMailbox::Arrival::Cached)
+                QueueVolumeResult(cached);
+            progress_at_.store(Now());
+            last_rx_.store(Now());
+            cJSON_Delete(root);
+            return;
+        }
+#endif
         if (Text(root, "type", "stage")) {
             if (!Text(root, "state", "asr") && !Text(root, "state", "llm") &&
-                !Text(root, "state", "tts")) {
+                !Text(root, "state", "tts")
+#ifdef CONFIG_STUBUDDY_AI_CONTROLS
+                && !Text(root, "state", "tools")
+#endif
+            ) {
                 cJSON_Delete(root);
                 Fault();
                 return;
@@ -550,9 +644,14 @@ void WsEcho::Event(void* context, esp_event_base_t, int32_t id, void* raw) {
 
 bool WsEcho::SendText(const char* text) {
     const size_t size = std::strlen(text);
-    if (esp_websocket_client_send_text(client_, text, size, pdMS_TO_TICKS(500)) == int(size))
+    const int sent =
+        esp_websocket_client_send_text(client_, text, size, pdMS_TO_TICKS(kSendTimeoutMs));
+    if (sent == int(size))
         return true;
-    Fault();
+    ESP_LOGW(kTag,
+             "WS SEND FAILED: text turn=%u requested=%u sent=%d timeout_ms=%u; no frame retry",
+             active_turn_.load(), unsigned(size), sent, kSendTimeoutMs);
+    Fault("text_socket_write_failed");
     return false;
 }
 
@@ -600,16 +699,27 @@ void WsEcho::Worker() {
         if (hello_needed_.exchange(false)) {
             close_requested_.store(false);
 #ifdef CONFIG_STUBUDDY_AI_PTT
+#ifdef CONFIG_STUBUDDY_AI_CONTROLS
+            SendText(
+                R"({"type":"hello","version":1,"transport":"websocket","ai_protocol":1,"reply_stream":1,"max_reply_packet_bytes":1275,"device_controls":1,"volume_restore":1,"audio_params":{"format":"opus","sample_rate":16000,"channels":1,"frame_duration":60}})");
+#else
             SendText(
                 R"({"type":"hello","version":1,"transport":"websocket","ai_protocol":1,"reply_stream":1,"max_reply_packet_bytes":1275,"audio_params":{"format":"opus","sample_rate":16000,"channels":1,"frame_duration":60}})");
+#endif
 #else
             SendText(
                 R"({"type":"hello","version":1,"transport":"websocket","echo_protocol":1,"audio_params":{"format":"opus","sample_rate":16000,"channels":1,"frame_duration":60}})");
 #endif
         }
-        if (connected_.load() &&
-            ((ready_.load() && !ready()) || (!ready_.load() && Now() - last_rx_.load() > 10000)))
-            Fault();
+        if (connected_.load()) {
+            if (ready_.load() && !ready())
+                Fault("link_or_rx_liveness_expired");
+            else if (!ready_.load()) {
+                const unsigned age = SnapshotAgeMs(last_rx_, Now);
+                if (age > 10000)
+                    Timeout("hello_wait", age, 10000);
+            }
+        }
         if (close_requested_.exchange(false) && connected_.load()) {
             ready_.store(false);
             esp_websocket_client_close_with_code(client_, 1002, nullptr, 0, pdMS_TO_TICKS(500));
@@ -629,10 +739,18 @@ void WsEcho::Worker() {
             const size_t size =
                 echo::PackAudio(wire_.data(), wire_.size(), sending_.turn, sending_.metadata.frames,
                                 sending_.payload, sending_.size);
-            if (!size ||
-                esp_websocket_client_send_bin(client_, reinterpret_cast<const char*>(wire_.data()),
-                                              size, pdMS_TO_TICKS(500)) != int(size))
-                Fault();
+            const int sent = size ? esp_websocket_client_send_bin(
+                                        client_, reinterpret_cast<const char*>(wire_.data()), size,
+                                        pdMS_TO_TICKS(kSendTimeoutMs))
+                                  : -1;
+            if (!size || sent != int(size)) {
+                ESP_LOGW(kTag,
+                         "WS SEND FAILED: audio turn=%u seq=%u requested=%u sent=%d timeout_ms=%u; "
+                         "no frame retry",
+                         sending_.turn, sending_.metadata.frames, unsigned(size), sent,
+                         kSendTimeoutMs);
+                Fault("audio_socket_write_failed");
+            }
         } else if (sending_.kind == Kind::Start) {
             std::snprintf(
                 text, sizeof(text),
@@ -647,7 +765,18 @@ void WsEcho::Worker() {
                           unsigned(m.turn), unsigned(m.samples), unsigned(m.delay),
                           unsigned(m.frames), unsigned(m.bytes), unsigned(m.crc32));
             SendText(text);
-        } else if (sending_.kind == Kind::Played) {
+        }
+#ifdef CONFIG_STUBUDDY_AI_CONTROLS
+        else if (sending_.kind == Kind::ToolResult) {
+            std::snprintf(text, sizeof(text),
+                          "{\"type\":\"tool_result\",\"turn\":%u,\"call_id\":\"%s\",\"session_id\":"
+                          "\"%s\",\"ok\":%s,\"volume\":%d}",
+                          sending_.turn, sending_.tool.request.id.data(), sending_.session.data(),
+                          sending_.tool.ok ? "true" : "false", sending_.tool.volume);
+            SendText(text);
+        }
+#endif
+        else if (sending_.kind == Kind::Played) {
             std::snprintf(text, sizeof(text), "{\"type\":\"playback_done\",\"turn\":%u}",
                           sending_.turn);
             SendText(text);

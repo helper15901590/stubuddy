@@ -101,6 +101,40 @@ constexpr bool CheckPlaybackInterrupt() {
 }
 static_assert(CheckPlaybackInterrupt(), "fresh-press interruption/released-key handoff regression");
 
+constexpr bool CheckPlaybackEndRearm() {
+    stubuddy::PttButton button;
+    button.RequireRelease(false, 0);
+    button.Update(false, 30);
+    stubuddy::PlaybackInterrupt playing(button.pressed());
+    if (!playing.released())
+        return false;
+    // Fresh press begins during final DMA drain; 30ms debounce still applies.
+    button.Update(true, 100);
+    button.Update(true, 129);
+    if (playing.Update(button.pressed()))
+        return false;
+    button.Update(true, 130);
+    if (!playing.Update(button.pressed()))
+        return false;
+    // A press straddling the return-to-idle boundary retains its debounce age.
+    stubuddy::PttButton boundary;
+    boundary.RequireRelease(false, 0);
+    boundary.Update(false, 30);
+    boundary.Update(true, 200);
+    boundary.Update(true, 220);  // playback returns; do not RequireRelease again
+    if (boundary.pressed())
+        return false;
+    boundary.Update(true, 230);
+    if (!boundary.pressed())
+        return false;
+    // The original 60-second held key is never armed by normal completion.
+    stubuddy::PlaybackInterrupt timed_out(true);
+    return !timed_out.released() && !timed_out.Update(true) && !timed_out.Update(false) &&
+           timed_out.released() && timed_out.Update(true);
+}
+static_assert(CheckPlaybackEndRearm(),
+              "playback drain/end press swallowed or held timeout key rearmed");
+
 int main() {
     const auto empty = stubuddy::AnalyzeRecording(nullptr, 0);
     assert(empty.gain == 0);
@@ -120,9 +154,10 @@ int main() {
     assert(stubuddy::ReplaySample(voice.back(), voice.size() - 1, voice.size(), loud, 160) == 0);
     for (size_t i = 0; i < voice.size(); ++i) {
         const auto sample = stubuddy::ReplaySample(voice[i], i, voice.size(), loud, 160);
-        assert(sample >= -983 && sample <= 983);
+        assert(sample >= -stubuddy::kOutputPeakPcm16 && sample <= stubuddy::kOutputPeakPcm16);
     }
     assert(stubuddy::ReplaySample(123, voice.size(), voice.size(), loud, 160) == 0);
+    assert(std::abs(stubuddy::ReplaySample(voice[500], 500, voice.size(), loud, 160)) >= 22935);
 
     const int16_t quiet[] = {-1, 1};
     const auto low = stubuddy::AnalyzeRecording(quiet, 2);

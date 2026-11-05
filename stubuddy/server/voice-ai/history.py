@@ -1,4 +1,4 @@
-"""Bounded sliding windows. Only device-confirmed playback commits a pair."""
+"""Bounded sliding windows. Completed answer text commits regardless of playback."""
 from collections import deque
 import time
 

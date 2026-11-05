@@ -14,7 +14,7 @@ ROOT = Path(__file__).resolve().parent
 TARGET = Path("/opt/stubuddy-ai")
 UNIT = Path("/etc/systemd/system/stubuddy-ai.service")
 MARK = "    # stubuddy-ai managed location"
-FILES = ("voice_server.py", "history.py", "audio.py", "providers.py", "requirements.txt", "echo_protocol.py", "smoke_test.py", ".private.json")
+FILES = ("voice_server.py", "history.py", "audio.py", "providers.py", "device_tools.py", "requirements.txt", "echo_protocol.py", "smoke_test.py", ".private.json")
 
 
 def run(*arguments):

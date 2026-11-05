@@ -1,5 +1,6 @@
 #include "network_audio.h"
 #include "audio_codec.h"
+#include "audio_levels.h"
 #include "status_led.h"
 #include "wifi_setup.h"
 
@@ -40,7 +41,7 @@ esp_err_t WriteTone(AudioCodec& codec, std::vector<int16_t>& block, unsigned fre
             const float envelope = std::min(1.0f, float(edge) / fade);
             block[i] = frequency == 0
                            ? 0
-                           : static_cast<int16_t>(983.0f * envelope *
+                           : static_cast<int16_t>(kOutputPeakPcm16 * envelope *
                                                   std::sin(2 * kPi * frequency * index / kRate));
         }
         codec.OutputData(block);

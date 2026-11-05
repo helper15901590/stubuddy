@@ -1,5 +1,7 @@
 #pragma once
 
+#include "audio_levels.h"
+
 #include <algorithm>
 #include <cmath>
 #include <cstddef>
@@ -15,7 +17,7 @@ struct RecordingLevels {
     float gain = 0;
 };
 
-// Same DC removal and bounded 3% playback peak as the accepted diagnostic.
+// Remove DC and normalize to the shared board playback peak.
 // Keep this independent of IDF to exercise silence/DC/extreme PCM on the host.
 inline RecordingLevels AnalyzeRecording(const int16_t* samples, size_t count) {
     RecordingLevels levels;
@@ -33,7 +35,7 @@ inline RecordingLevels AnalyzeRecording(const int16_t* samples, size_t count) {
         levels.clipped += samples[i] == INT16_MIN || samples[i] == INT16_MAX;
     }
     levels.rms = std::sqrt(energy / count);
-    levels.gain = levels.peak > 0 ? std::min(8.0f, 983.0f / levels.peak) : 0.0f;
+    levels.gain = levels.peak > 0 ? std::min(8.0f, float(kOutputPeakPcm16) / levels.peak) : 0.0f;
     return levels;
 }
 
@@ -44,6 +46,7 @@ inline int16_t ReplaySample(int16_t raw, size_t index, size_t count, const Recor
     const size_t edge = std::min(index, count - 1 - index);
     const float envelope = std::min(1.0f, float(edge) / fade_samples);
     const float value = (int32_t(raw) - levels.mean) * levels.gain * envelope;
-    return static_cast<int16_t>(std::clamp(value, -983.0f, 983.0f));
+    return static_cast<int16_t>(
+        std::clamp(value, -float(kOutputPeakPcm16), float(kOutputPeakPcm16)));
 }
 }  // namespace stubuddy

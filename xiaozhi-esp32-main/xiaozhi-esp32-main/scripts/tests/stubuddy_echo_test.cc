@@ -1,4 +1,5 @@
 #include "ai_stream.h"
+#include "clock_age.h"
 #include "echo_protocol.h"
 
 #include <cassert>
@@ -8,11 +9,28 @@
 int main() {
     using namespace stubuddy;
     using namespace stubuddy::echo;
+    std::atomic<unsigned> timestamp{1000};
+    const auto concurrent_clock = [&]() {
+        timestamp.store(1001);  // producer advances between stamp and clock reads
+        return 1001U;
+    };
+    assert(SnapshotAgeMs(timestamp, concurrent_clock) == 1);
+    assert(ElapsedMs(1000, 1001) == 0);          // defensive future-stamp guard
+    assert(ElapsedMs(0x10, 0xfffffff0U) == 32);  // real timer wrap
+    timestamp.store(1000);
+    assert(SnapshotAgeMs(timestamp, [] { return 45999U; }) < 45000);
+    assert(SnapshotAgeMs(timestamp, [] { return 46000U; }) == 45000);
+    assert(ElapsedMs(138572, 138573) < 20000);  // cannot revoke a live connection
     std::vector<int16_t> quiet_prefix(4800, 0);
     const auto stream_levels = AiStreamLevels(quiet_prefix.data(), quiet_prefix.size());
     assert(stream_levels.gain > 0);
     assert(ReplaySample(10000, 1000, 4800, stream_levels, 160) > 0);
-    assert(ReplaySample(32767, 1000, 4800, stream_levels, 160) <= 983);
+    assert(ReplaySample(32767, 1000, 4800, stream_levels, 160) == kOutputPeakPcm16);
+    assert(ReplaySample(-32768, 1000, 4800, stream_levels, 160) == -kOutputPeakPcm16);
+    assert(ReplaySample(10000, 1000, 4800, stream_levels, 160) > 9000);
+    const int16_t loud_prefix[] = {-30000, 30000};
+    const auto loud_levels = AiStreamLevels(loud_prefix, 2);
+    assert(std::abs(ReplaySample(30000, 1000, 4800, loud_levels, 160) - kOutputPeakPcm16) <= 1);
     // Regression: the real CosyVoice first packet was 244 bytes, exceeding
     // the unrelated local encoder's 227-byte capacity.
     std::vector<uint8_t> ai_storage(2 * (kAiReplyPacketBytes + 2));

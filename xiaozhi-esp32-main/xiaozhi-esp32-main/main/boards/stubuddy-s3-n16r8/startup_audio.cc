@@ -1,5 +1,6 @@
 #include "startup_audio.h"
 #include "audio_codec.h"
+#include "audio_levels.h"
 #include "board.h"
 
 #include <esp_flash.h>
@@ -16,7 +17,6 @@ constexpr char kTag[] = "STUBUDDY_STARTUP";
 constexpr unsigned kBlockSamples = 128;
 constexpr unsigned kToneMs = 180;
 constexpr unsigned kFadeMs = 10;
-constexpr float kPeak = 983.0f;  // Same 3% PCM16 peak as the accepted hardware test.
 constexpr float kPi = 3.14159265358979323846f;
 
 // The board factory must be constructed before checks, so failure paths also
@@ -45,7 +45,8 @@ bool PlayStartupPrompt(Board& board, PlaybackIndicator indicator) {
         ESP_LOGE(kTag, "Unexpected AudioCodec format");
         return false;
     }
-    ESP_LOGI(kTag, "READY: one 660 Hz tone in 2 seconds; fixed 3%% peak");
+    ESP_LOGI(kTag, "READY: one 660 Hz tone in 2 seconds; fixed %d%% peak=%d", kOutputPeakPercent,
+             kOutputPeakPcm16);
     vTaskDelay(pdMS_TO_TICKS(2000));
     codec->EnableOutput(true);
     if (!codec->output_enabled()) {
@@ -65,8 +66,8 @@ bool PlayStartupPrompt(Board& board, PlaybackIndicator indicator) {
             const unsigned index = offset + i;
             const unsigned edge = std::min(index, total - 1 - index);
             const float envelope = std::min(1.0f, float(edge) / fade);
-            block[i] =
-                static_cast<int16_t>(kPeak * envelope * std::sin(2 * kPi * 660 * index / rate));
+            block[i] = static_cast<int16_t>(kOutputPeakPcm16 * envelope *
+                                            std::sin(2 * kPi * 660 * index / rate));
         }
         codec->OutputData(block);
         if (!codec->output_enabled()) {
