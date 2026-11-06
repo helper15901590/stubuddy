@@ -671,8 +671,10 @@ class SessionTests(unittest.IsolatedAsyncioTestCase):
         again = await self.client()
         await self.upload(again, 1)
         await self.until(again, "reply_end")
-        self.assertEqual([m["content"] for m in self.provider.queries[-1]],
-                         [self.service.prompt, "Q1", "A1", "Q2", "A2", "Q3"])
+        prompt, *conversation = [m['content'] for m in self.provider.queries[-1]]
+        self.assertTrue(prompt.startswith(self.service.prompt))
+        self.assertIn('本次连接实际开放的功能', prompt)
+        self.assertEqual(conversation, ['Q1', 'A1', 'Q2', 'A2', 'Q3'])
 
 
 if __name__ == "__main__":

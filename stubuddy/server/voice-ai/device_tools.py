@@ -113,7 +113,7 @@ async def answer_with_tools(provider, messages, execute, restore_supported=False
         # Do not expose device tools on a learning/chat turn. In particular,
         # arithmetic follow-ups must not inherit the last device-control topic.
         plain = [dict(message) for message in messages]
-        instruction = ("本轮是普通问答，不能操作设备或声称改变了音量。"
+        instruction = ("本轮是普通问答，不能操作设备或声称改变了音量、创建、取消或删除了任何设备提醒。"
                        "‘再加1’等算术追问延续最近的数学问答；缺少对应历史时先澄清，不把数字当音量。")
         if plain and plain[0].get("role") == "system": plain[0]["content"] += "\n" + instruction
         else: plain.insert(0, {"role": "system", "content": instruction})

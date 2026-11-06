@@ -204,7 +204,11 @@ def validate_status(result):
         raise ValueError("Device did not confirm countdown status")
 
 
-async def plan(provider, messages, instruction, properties, required):
+class PlanValidationError(ValueError):
+    """The model returned no usable structured plan; no device write occurred."""
+
+
+async def plan(provider, messages, instruction, properties, required, max_tokens=256):
     conversation = [dict(m) for m in messages]
     conversation.insert(0, {"role": "system", "content": instruction})
     message = await provider.completion_message({
@@ -214,15 +218,20 @@ async def plan(provider, messages, instruction, properties, required):
             "required": required, "additionalProperties": False}}}],
         "tool_choice": {"type": "function", "function": {"name": "countdown_plan"}},
         "parallel_tool_calls": False, "stream": False, "enable_thinking": False,
-        "temperature": 0.2, "max_tokens": 256})
+        "temperature": 0.2, "max_tokens": max_tokens})
     calls = message.get('tool_calls')
-    if not isinstance(calls, list) or len(calls) != 1:
-        raise ValueError("Expected one countdown plan")
+    if not isinstance(calls, list) or len(calls) != 1 or not isinstance(calls[0], dict):
+        raise PlanValidationError("Expected one countdown plan")
     function = calls[0].get('function', {})
+    if not isinstance(function, dict):
+        raise PlanValidationError('Invalid countdown function')
     raw = function.get('arguments')
     if function.get('name') != 'countdown_plan' or not isinstance(raw, str) or len(raw) > 600:
-        raise ValueError("Invalid countdown plan")
-    values = json.loads(raw)
+        raise PlanValidationError("Invalid countdown plan")
+    try:
+        values = json.loads(raw)
+    except json.JSONDecodeError as error:
+        raise PlanValidationError('Malformed countdown arguments') from error
     if type(values) is not dict or set(values) != set(required):
-        raise ValueError("Invalid countdown arguments")
+        raise PlanValidationError("Invalid countdown arguments")
     return values

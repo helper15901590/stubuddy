@@ -91,10 +91,15 @@ esp_err_t WsEcho::Start(WifiSetup& wifi, OpusPacketStore& received, size_t packe
     packet_limit_ = packet_limit;
     rx_mutex_ = xSemaphoreCreateMutex();
 #ifdef CONFIG_STUBUDDY_COUNTDOWN
+#ifdef CONFIG_STUBUDDY_SCHEDULED
+    using PreparedCache = ReminderBank;
+#else
+    using PreparedCache = ReminderCache;
+#endif
     auto* reminder_storage = static_cast<uint8_t*>(
-        heap_caps_malloc(ReminderCache::kCapacity, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+        heap_caps_malloc(PreparedCache::kCapacity, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
     ESP_RETURN_ON_FALSE(reminder_storage, ESP_ERR_NO_MEM, kTag, "Cannot allocate reminder cache");
-    reminder_ = std::make_unique<ReminderCache>(reminder_storage);
+    reminder_ = std::make_unique<PreparedCache>(reminder_storage);
 #endif
     queue_storage_ = static_cast<uint8_t*>(
         heap_caps_malloc(kQueueDepth * sizeof(Command), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
@@ -325,6 +330,13 @@ void WsEcho::CompleteVolumeRequest(const VolumeResult& result) {
 #endif
 
 #ifdef CONFIG_STUBUDDY_COUNTDOWN
+#ifdef CONFIG_STUBUDDY_SCHEDULED
+void WsEcho::KeepReminders(const std::array<ReminderEntry, 4>& entries) {
+    xSemaphoreTake(rx_mutex_, portMAX_DELAY);
+    reminder_->Keep(entries);
+    xSemaphoreGive(rx_mutex_);
+}
+#endif
 bool WsEcho::ReminderReady(const char* id) {
     xSemaphoreTake(rx_mutex_, portMAX_DELAY);
     const bool ready = reminder_->Ready(id);
@@ -466,6 +478,14 @@ void WsEcho::OnMessage(unsigned opcode, const uint8_t* data, size_t size) {
                 Fault("server_missing_countdown_update_server_first");
                 return;
             }
+#ifdef CONFIG_STUBUDDY_SCHEDULED
+            uint32_t scheduled = 0;
+            if (!UInt(root, "scheduled", scheduled) || scheduled != 1) {
+                cJSON_Delete(root);
+                Fault("server_missing_scheduled_update_server_first");
+                return;
+            }
+#endif
 #endif
 #endif
 #endif
@@ -554,6 +574,18 @@ void WsEcho::OnMessage(unsigned opcode, const uint8_t* data, size_t size) {
                 action = TimerAction::Cancel;
             if (Text(root, "name", "self.countdown.volume"))
                 action = TimerAction::Volume;
+#ifdef CONFIG_STUBUDDY_SCHEDULED
+            if (Text(root, "name", "self.reminders.get"))
+                action = TimerAction::Get;
+            if (Text(root, "name", "self.reminders.countdown"))
+                action = TimerAction::Start;
+            if (Text(root, "name", "self.reminders.start"))
+                action = TimerAction::ScheduledStart;
+            if (Text(root, "name", "self.reminders.cancel"))
+                action = TimerAction::Cancel;
+            if (Text(root, "name", "self.reminders.volume"))
+                action = TimerAction::Volume;
+#endif
             timer = action != TimerAction::None;
 #endif
             uint32_t volume = 0;
@@ -597,6 +629,44 @@ void WsEcho::OnMessage(unsigned opcode, const uint8_t* data, size_t size) {
                 std::strcpy(request.cache_id.data(), id->valuestring);
                 std::strcpy(request.text.data(), text->valuestring);
             }
+#ifdef CONFIG_STUBUDDY_SCHEDULED
+            if (action == TimerAction::Start || action == TimerAction::ScheduledStart ||
+                action == TimerAction::Cancel) {
+                const auto* identity = cJSON_GetObjectItemCaseSensitive(root, "cache_id");
+                bool valid = cJSON_IsString(identity) && std::strlen(identity->valuestring) == 16 &&
+                             std::strspn(identity->valuestring, "0123456789abcdef") == 16;
+                if (valid)
+                    std::strcpy(request.cache_id.data(), identity->valuestring);
+                if (action != TimerAction::Cancel) {
+                    const auto* item = cJSON_GetObjectItemCaseSensitive(root, "item");
+                    const auto* speech = cJSON_GetObjectItemCaseSensitive(root, "text");
+                    valid = valid && cJSON_IsString(item) && item->valuestring[0] &&
+                            std::strlen(item->valuestring) <= 60 && cJSON_IsString(speech) &&
+                            speech->valuestring[0] && std::strlen(speech->valuestring) <= 120;
+                    if (valid) {
+                        std::strcpy(request.item.data(), item->valuestring);
+                        std::strcpy(request.text.data(), speech->valuestring);
+                    }
+                }
+                if (action == TimerAction::ScheduledStart) {
+                    const auto* deadline = cJSON_GetObjectItemCaseSensitive(root, "deadline");
+                    valid = valid && UInt(root, "minute", request.minute) &&
+                            request.minute < 1440 && UInt(root, "weekdays", request.weekdays) &&
+                            request.weekdays <= 127 && cJSON_IsNumber(deadline) &&
+                            std::isfinite(deadline->valuedouble) &&
+                            deadline->valuedouble >= 1767225600 &&
+                            deadline->valuedouble < 4102444800LL &&
+                            std::floor(deadline->valuedouble) == deadline->valuedouble;
+                    if (valid)
+                        request.deadline = int64_t(deadline->valuedouble);
+                }
+                if (!valid) {
+                    cJSON_Delete(root);
+                    Fault("invalid_reminder_arguments");
+                    return;
+                }
+            }
+#endif
 #endif
             VolumeResult cached;
             const auto arrival = tools_.Receive(request, cached);
@@ -827,8 +897,13 @@ void WsEcho::Worker() {
 #ifdef CONFIG_STUBUDDY_AI_PTT
 #ifdef CONFIG_STUBUDDY_AI_CONTROLS
 #ifdef CONFIG_STUBUDDY_COUNTDOWN
+#ifdef CONFIG_STUBUDDY_SCHEDULED
+            SendText(
+                R"({"type":"hello","version":1,"transport":"websocket","ai_protocol":1,"reply_stream":1,"max_reply_packet_bytes":1275,"device_controls":1,"volume_restore":1,"countdown":1,"scheduled":1,"audio_params":{"format":"opus","sample_rate":16000,"channels":1,"frame_duration":60}})");
+#else
             SendText(
                 R"({"type":"hello","version":1,"transport":"websocket","ai_protocol":1,"reply_stream":1,"max_reply_packet_bytes":1275,"device_controls":1,"volume_restore":1,"countdown":1,"audio_params":{"format":"opus","sample_rate":16000,"channels":1,"frame_duration":60}})");
+#endif
 #else
             SendText(
                 R"({"type":"hello","version":1,"transport":"websocket","ai_protocol":1,"reply_stream":1,"max_reply_packet_bytes":1275,"device_controls":1,"volume_restore":1,"audio_params":{"format":"opus","sample_rate":16000,"channels":1,"frame_duration":60}})");
@@ -903,6 +978,40 @@ void WsEcho::Worker() {
         else if (sending_.kind == Kind::ToolResult) {
 #ifdef CONFIG_STUBUDDY_COUNTDOWN
             if (sending_.tool.request.action != TimerAction::None) {
+#ifdef CONFIG_STUBUDDY_SCHEDULED
+                const auto& result = sending_.tool;
+                cJSON* root = cJSON_CreateObject();
+                cJSON_AddStringToObject(root, "type", "tool_result");
+                cJSON_AddNumberToObject(root, "turn", sending_.turn);
+                cJSON_AddStringToObject(root, "call_id", result.request.id.data());
+                cJSON_AddStringToObject(root, "session_id", sending_.session.data());
+                cJSON_AddBoolToObject(root, "ok", result.ok);
+                cJSON_AddNumberToObject(root, "error", result.error);
+                cJSON_AddNumberToObject(root, "now", double(result.now));
+                cJSON_AddNumberToObject(root, "alarm_volume", result.alarm_volume);
+                auto* records = cJSON_AddArrayToObject(root, "records");
+                for (unsigned i = 0; i < result.records.size(); ++i) {
+                    const auto& entry = result.records[i];
+                    if (!entry.deadline)
+                        continue;
+                    auto* row = cJSON_CreateObject();
+                    cJSON_AddStringToObject(row, "id", entry.id);
+                    cJSON_AddStringToObject(row, "item", entry.item);
+                    cJSON_AddStringToObject(row, "text", entry.text);
+                    cJSON_AddStringToObject(row, "kind", i == 0 ? "countdown" : "scheduled");
+                    cJSON_AddNumberToObject(row, "deadline", double(entry.deadline));
+                    cJSON_AddNumberToObject(row, "minute", entry.minute);
+                    cJSON_AddNumberToObject(row, "weekdays", entry.weekdays);
+                    cJSON_AddItemToArray(records, row);
+                }
+                char* message = cJSON_PrintUnformatted(root);
+                if (message && std::strlen(message) <= 4000)
+                    SendText(message);
+                else
+                    Fault("reminder_status_size");
+                cJSON_free(message);
+                cJSON_Delete(root);
+#else
                 std::snprintf(
                     text, sizeof(text),
                     "{\"type\":\"tool_result\",\"turn\":%u,\"call_id\":\"%s\",\"session_id\":\"%"
@@ -911,6 +1020,7 @@ void WsEcho::Worker() {
                     sending_.tool.ok ? "true" : "false", sending_.tool.active ? "true" : "false",
                     sending_.tool.remaining, sending_.tool.alarm_volume);
                 SendText(text);
+#endif
                 continue;
             }
 #endif

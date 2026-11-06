@@ -24,7 +24,11 @@ from audio import decode, encode, StreamEncoder, REPLY_PACKET_LIMIT
 from history import History
 from providers import DashScope, PROMPT, ProviderFailure, clean_spoken_text, SPOKEN_INSTRUCTION
 from device_tools import answer_with_tools, GET, SET, result_volume, volume_intent, volume_speech_text
+from device_tools import short_setting, short_restore
+import capabilities
+import clock_answers
 import countdown_tools
+import reminder_tools
 
 LOG = logging.getLogger("stubuddy.ai")
 PATH = "/stubuddy/ai"
@@ -92,7 +96,12 @@ class VoiceService:
         device_controls = False
         volume_restore = False
         countdown = False
+        scheduled = False
+        reminder_view = getattr(history, 'reminder_view', {})
+        history.reminder_view = reminder_view
         restore_task = None
+        restore_queue = asyncio.Queue(maxsize=4)
+        restore_ids = set()
         tool_waiter = None
         send_lock = asyncio.Lock()
         cache_lock = asyncio.Lock()
@@ -133,7 +142,9 @@ class VoiceService:
                 await send({"type": "stage", "state": "tools"}, turn)
                 await send({"type": "device_tool", "call_id": call_id, "name": name, **values}, turn)
                 result = await asyncio.wait_for(future, 5)
-                if name.startswith('self.countdown.'):
+                if name.startswith('self.reminders.'):
+                    reminder_tools.validate_status(result)
+                elif name.startswith('self.countdown.'):
                     countdown_tools.validate_status(result)
                 else:
                     result_volume(result)
@@ -168,12 +179,46 @@ class VoiceService:
                         await send({"type": "stt", "text": shown}, turn)
                         stage = "llm"
                         await send({"type": "stage", "state": stage}, turn)
-                        messages = history.messages(self.prompt, query)
-                        is_countdown = countdown and countdown_tools.intent(query, messages)
+                        help_answer = capabilities.answer(query, device_controls, volume_restore, countdown, scheduled)
+                        clock_request = clock_answers.intent(query)
+                        facts = capabilities.answer('你有哪些功能？', device_controls, volume_restore, countdown, scheduled)
+                        messages = history.messages(self.prompt + '\n本次连接实际开放的功能：' + facts +
+                            '\n普通聊天不能声称已经创建、修改、取消或删除设备提醒，也不能声称已经改变设备音量。', query)
+                        is_reminder = scheduled and not help_answer and not clock_request and reminder_tools.intent(query, messages, reminder_view)
+                        is_countdown = countdown and not scheduled and not help_answer and countdown_tools.intent(query, messages)
+                        domain = 'help' if help_answer else 'reminders' if is_reminder else 'countdown' if is_countdown else (
+                            'volume' if device_controls and volume_intent(query, messages) else 'chat')
+                        help_volume_ambiguous = (getattr(history, 'last_domain', None) in ('help', 'volume_clarify') and
+                            (short_setting(query) or short_restore(query)))
+                        if help_volume_ambiguous: domain = 'volume_clarify'
+                        if clock_request: domain = 'clock'
                         LOG.info("ROUTE session=%s turn=%s domain=%s history_completed=%s current_is_extra=true",
-                                 session, turn, "countdown" if is_countdown else
-                                 "volume" if device_controls and volume_intent(query, messages) else "chat", len(history.pairs))
-                        if is_countdown:
+                                 session, turn, domain, len(history.pairs))
+                        if not is_reminder:
+                            reminder_view['topic'] = None
+                            reminder_view.pop('draft', None)
+                            reminder_view.pop('cancel_until', None)
+                            reminder_view.pop('query_clarification', None)
+                        if clock_request:
+                            if scheduled:
+                                stage = 'tools'
+                                clock_status = await device_tool(turn, reminder_tools.GET, {})
+                                if not clock_status['ok']: raise ValueError('Device clock unavailable')
+                                timestamp, source = clock_status['now'], 'device_sntp'
+                            else:
+                                timestamp, source = time.time(), 'server'
+                            answer = clock_answers.answer(clock_request, timestamp)
+                            LOG.info('CLOCK ANSWER session=%s turn=%s source=%s epoch=%s', session, turn, source, int(timestamp))
+                        elif help_answer:
+                            answer = help_answer
+                        elif help_volume_ambiguous:
+                            answer = '请说明要调哪一种音量，对话音量还是提醒音量？'
+                        elif is_reminder:
+                            stage = 'tools'
+                            answer = await reminder_tools.answer(self.provider, messages,
+                                lambda name, values: device_tool(turn, name, values),
+                                lambda text, identity: prepare_reminder(text, identity, turn), reminder_view)
+                        elif is_countdown:
                             stage = 'tools'
                             answer = await countdown_tools.answer(self.provider, messages,
                                 lambda name, values: device_tool(turn, name, values),
@@ -193,13 +238,15 @@ class VoiceService:
                         # its audio is interrupted, fails, or the device reconnects.
                         # No await between the active-turn check and single commit.
                         history.commit(query, answer)
+                        history.last_domain = domain
                         LOG.info("HISTORY COMMIT session=%s turn=%s stored_rounds=%s reason=answer_ready",
                                  session, turn, len(history.pairs))
                         answered_at = time.monotonic()
                         LOG.info("TIMING session=%s turn=%s queue_ms=%s decode_ms=%s asr_ms=%s llm_tools_ms=%s answer_chars=%s",
                                  session, turn, round((admitted-started)*1000), round((decoded_at-admitted)*1000),
                                  round((recognized_at-decoded_at)*1000), round((answered_at-recognized_at)*1000), len(answer))
-                        await send({"type": "reply_text", "text": answer}, turn)
+                        shown_answer = answer if len(answer) <= 180 else answer[:80] + '…' + answer[-80:]
+                        await send({"type": "reply_text", "text": shown_answer}, turn)
                         stage = "tts"
                         await send({"type": "stage", "state": stage}, turn)
                         speech_text = volume_speech_text(answer)
@@ -314,12 +361,17 @@ class VoiceService:
                 if not volume_restore or type(hello['countdown']) is not int or hello['countdown'] != 1:
                     raise ProtocolError('Invalid countdown capability')
                 countdown = True
+            if 'scheduled' in hello:
+                if not countdown or type(hello['scheduled']) is not int or hello['scheduled'] != 1:
+                    raise ProtocolError('Invalid scheduled reminder capability')
+                scheduled = True
             await send({"type": "hello", "transport": "websocket", "ai_protocol": 1,
                         "audio_params": AUDIO_PARAMS, **({"reply_stream": 1,
                         "max_reply_packet_bytes": REPLY_PACKET_LIMIT} if streaming else {}),
                         **({"device_controls": 1} if device_controls else {}),
                         **({"volume_restore": 1} if volume_restore else {}),
-                        **({"countdown": 1} if countdown else {})})
+                        **({"countdown": 1} if countdown else {}),
+                        **({'scheduled': 1} if scheduled else {})})
             LOG.info("READY session=%s history=%s completed rounds; current input is extra", session, self.rounds)
             while True:
                 raw = await asyncio.wait_for(socket.recv(), 90)
@@ -340,18 +392,24 @@ class VoiceService:
                     if (not isinstance(identity, str) or not re.fullmatch('[a-f0-9]{16}', identity) or
                             not isinstance(text, str) or not 1 <= len(text) <= 40):
                         raise ProtocolError('Invalid reminder sync')
-                    if restore_task:
-                        restore_task.cancel()
-                        with contextlib.suppress(asyncio.CancelledError, ConnectionClosed):
-                            await restore_task
-                    async def restore_voice(identity=identity, text=text):
-                        try:
-                            await prepare_reminder(text, identity)
-                        except (ConnectionClosed, asyncio.CancelledError):
-                            raise
-                        except Exception as error:
-                            LOG.warning('COUNTDOWN CACHE FAILED session=%s kind=%s', session, type(error).__name__)
-                    restore_task = asyncio.create_task(restore_voice())
+                    if identity not in restore_ids:
+                        if restore_queue.full():
+                            raise ProtocolError('Reminder restore queue limit')
+                        restore_ids.add(identity)
+                        restore_queue.put_nowait((identity, text))
+                    async def restore_voice():
+                        while not restore_queue.empty():
+                            identity, text = restore_queue.get_nowait()
+                            try:
+                                await prepare_reminder(text, identity)
+                            except (ConnectionClosed, asyncio.CancelledError):
+                                raise
+                            except Exception as error:
+                                LOG.warning('COUNTDOWN CACHE FAILED session=%s kind=%s', session, type(error).__name__)
+                            finally:
+                                restore_ids.discard(identity)
+                    if restore_task is None or restore_task.done():
+                        restore_task = asyncio.create_task(restore_voice())
                     continue
                 turn = message.get("turn")
                 if type(turn) is not int or not 1 <= turn <= 0xFFFFFFFF:
@@ -364,7 +422,7 @@ class VoiceService:
                             raise ProtocolError("Invalid tool result")
                         if not tool_waiter[2].done():
                             tool_waiter[2].set_result({key: message.get(key) for key in
-                                ('ok', 'volume', 'active', 'remaining', 'alarm_volume')})
+                                ('ok', 'volume', 'active', 'remaining', 'alarm_volume', 'records', 'now', 'error')})
                     continue  # Stale/duplicate acknowledgements cannot mutate state or history.
                 if kind == "listen" and message.get("state") == "start":
                     if turn <= high_turn or message.get("mode") != "manual":

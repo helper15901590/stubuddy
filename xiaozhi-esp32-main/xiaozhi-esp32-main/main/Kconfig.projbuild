@@ -70,6 +70,14 @@ config STUBUDDY_AI_CONTROLS
         Negotiate restricted volume tools, persistent speech volume and DMA
         playback LED metering. Remain PTT only, without VAD or generic MCP.
 
+config STUBUDDY_SCHEDULED
+    bool "Enable stubuddy three scheduled reminders (checkpoint 4.3.2)"
+    depends on STUBUDDY_COUNTDOWN
+    default n
+    help
+        One countdown and three once/weekly plans, device-owned persistence,
+        five-minute schedule spacing and shared independent reminder volume.
+
 config STUBUDDY_COUNTDOWN
     bool "Enable stubuddy single countdown reminder (checkpoint 4.3.1)"
     depends on STUBUDDY_AI_CONTROLS

@@ -18,7 +18,8 @@
                 "CONFIG_FLASH_NONE_ASSETS=y",
                 "CONFIG_STUBUDDY_AI_PTT=n",
                 "CONFIG_STUBUDDY_AI_CONTROLS=n",
-                "CONFIG_STUBUDDY_COUNTDOWN=n"
+                "CONFIG_STUBUDDY_COUNTDOWN=n",
+                "CONFIG_STUBUDDY_SCHEDULED=n"
             ]
         },
         {
@@ -37,7 +38,8 @@
                 "CONFIG_FLASH_NONE_ASSETS=y",
                 "CONFIG_STUBUDDY_AI_PTT=n",
                 "CONFIG_STUBUDDY_AI_CONTROLS=n",
-                "CONFIG_STUBUDDY_COUNTDOWN=n"
+                "CONFIG_STUBUDDY_COUNTDOWN=n",
+                "CONFIG_STUBUDDY_SCHEDULED=n"
             ]
         },
         {
@@ -56,7 +58,8 @@
                 "CONFIG_FLASH_NONE_ASSETS=y",
                 "CONFIG_STUBUDDY_AI_PTT=n",
                 "CONFIG_STUBUDDY_AI_CONTROLS=n",
-                "CONFIG_STUBUDDY_COUNTDOWN=n"
+                "CONFIG_STUBUDDY_COUNTDOWN=n",
+                "CONFIG_STUBUDDY_SCHEDULED=n"
             ]
         },
         {
@@ -75,7 +78,8 @@
                 "CONFIG_FLASH_NONE_ASSETS=y",
                 "CONFIG_STUBUDDY_AI_PTT=n",
                 "CONFIG_STUBUDDY_AI_CONTROLS=n",
-                "CONFIG_STUBUDDY_COUNTDOWN=n"
+                "CONFIG_STUBUDDY_COUNTDOWN=n",
+                "CONFIG_STUBUDDY_SCHEDULED=n"
             ]
         },
         {
@@ -95,7 +99,8 @@
                 "CONFIG_FLASH_NONE_ASSETS=y",
                 "CONFIG_STUBUDDY_AI_PTT=n",
                 "CONFIG_STUBUDDY_AI_CONTROLS=n",
-                "CONFIG_STUBUDDY_COUNTDOWN=n"
+                "CONFIG_STUBUDDY_COUNTDOWN=n",
+                "CONFIG_STUBUDDY_SCHEDULED=n"
             ]
         },
         {
@@ -116,7 +121,8 @@
                 "CONFIG_FLASH_NONE_ASSETS=y",
                 "CONFIG_STUBUDDY_AI_PTT=n",
                 "CONFIG_STUBUDDY_AI_CONTROLS=n",
-                "CONFIG_STUBUDDY_COUNTDOWN=n"
+                "CONFIG_STUBUDDY_COUNTDOWN=n",
+                "CONFIG_STUBUDDY_SCHEDULED=n"
             ]
         },
         {
@@ -138,7 +144,8 @@
                 "CONFIG_FLASH_NONE_ASSETS=y",
                 "CONFIG_STUBUDDY_AI_PTT=n",
                 "CONFIG_STUBUDDY_AI_CONTROLS=n",
-                "CONFIG_STUBUDDY_COUNTDOWN=n"
+                "CONFIG_STUBUDDY_COUNTDOWN=n",
+                "CONFIG_STUBUDDY_SCHEDULED=n"
             ]
         },
         {
@@ -160,7 +167,8 @@
                 "CONFIG_FLASH_NONE_ASSETS=y",
                 "CONFIG_STUBUDDY_AI_PTT=y",
                 "CONFIG_STUBUDDY_AI_CONTROLS=n",
-                "CONFIG_STUBUDDY_COUNTDOWN=n"
+                "CONFIG_STUBUDDY_COUNTDOWN=n",
+                "CONFIG_STUBUDDY_SCHEDULED=n"
             ]
         },
         {
@@ -182,7 +190,8 @@
                 "CONFIG_FLASH_NONE_ASSETS=y",
                 "CONFIG_STUBUDDY_AI_PTT=y",
                 "CONFIG_STUBUDDY_AI_CONTROLS=y",
-                "CONFIG_STUBUDDY_COUNTDOWN=n"
+                "CONFIG_STUBUDDY_COUNTDOWN=n",
+                "CONFIG_STUBUDDY_SCHEDULED=n"
             ]
         },
         {
@@ -204,7 +213,31 @@
                 "CONFIG_FLASH_NONE_ASSETS=y",
                 "CONFIG_STUBUDDY_AI_PTT=y",
                 "CONFIG_STUBUDDY_AI_CONTROLS=y",
-                "CONFIG_STUBUDDY_COUNTDOWN=y"
+                "CONFIG_STUBUDDY_COUNTDOWN=y",
+                "CONFIG_STUBUDDY_SCHEDULED=n"
+            ]
+        },
+        {
+            "name": "stubuddy-s3-n16r8-ai-ptt-reminders",
+            "sdkconfig_defaults": [
+                "main/boards/stubuddy-s3-n16r8/startup.defaults",
+                "main/boards/stubuddy-s3-n16r8/opus.defaults",
+                "main/boards/stubuddy-s3-n16r8/ws_echo.defaults",
+                "main/boards/stubuddy-s3-n16r8/wss_echo.defaults"
+            ],
+            "sdkconfig_append": [
+                "CONFIG_XIAOZHI_HEADLESS_STARTUP=y",
+                "CONFIG_STUBUDDY_PTT_SELFTEST=y",
+                "CONFIG_STUBUDDY_STATUS_LED=y",
+                "CONFIG_STUBUDDY_SOFTAP_SETUP=y",
+                "CONFIG_STUBUDDY_OPUS_LOOPBACK=y",
+                "CONFIG_STUBUDDY_WS_ECHO=y",
+                "CONFIG_STUBUDDY_WSS_ECHO=y",
+                "CONFIG_FLASH_NONE_ASSETS=y",
+                "CONFIG_STUBUDDY_AI_PTT=y",
+                "CONFIG_STUBUDDY_AI_CONTROLS=y",
+                "CONFIG_STUBUDDY_COUNTDOWN=y",
+                "CONFIG_STUBUDDY_SCHEDULED=y"
             ]
         }
     ]

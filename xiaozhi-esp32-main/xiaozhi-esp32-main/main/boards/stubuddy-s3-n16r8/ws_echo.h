@@ -10,6 +10,9 @@
 #include <memory>
 #include "countdown_state.h"
 #include "reminder_cache.h"
+#ifdef CONFIG_STUBUDDY_SCHEDULED
+#include "reminder_bank.h"
+#endif
 #endif
 
 #include <esp_websocket_client.h>
@@ -54,6 +57,9 @@ public:
     bool ReadReminder(const char* id, size_t& cursor, uint8_t* data, size_t& size,
                       echo::Metadata& metadata);
     void SyncCountdown(const CountdownState& state);
+#ifdef CONFIG_STUBUDDY_SCHEDULED
+    void KeepReminders(const std::array<ReminderEntry, 4>& entries);
+#endif
 #endif
 
 private:
@@ -107,7 +113,11 @@ private:
     void QueueVolumeResult(const VolumeResult& result);
 #endif
 #ifdef CONFIG_STUBUDDY_COUNTDOWN
+#ifdef CONFIG_STUBUDDY_SCHEDULED
+    std::unique_ptr<ReminderBank> reminder_;
+#else
     std::unique_ptr<ReminderCache> reminder_;
+#endif
 #endif
 };
 }  // namespace stubuddy

@@ -2,9 +2,12 @@
 #include <array>
 #include <cstdint>
 #include <cstring>
+#ifdef CONFIG_STUBUDDY_SCHEDULED
+#include "scheduled_state.h"
+#endif
 
 namespace stubuddy {
-enum class TimerAction { None, Get, Start, Cancel, Volume };
+enum class TimerAction { None, Get, Start, Cancel, Volume, ScheduledStart };
 struct VolumeRequest {
     unsigned turn = 0;
     std::array<char, 17> id{};
@@ -16,6 +19,11 @@ struct VolumeRequest {
     uint32_t seconds = 0;
     std::array<char, 17> cache_id{};
     std::array<char, 121> text{};
+#ifdef CONFIG_STUBUDDY_SCHEDULED
+    int64_t deadline = 0;
+    uint32_t minute = 0, weekdays = 0;
+    std::array<char, 61> item{};
+#endif
 #endif
     bool operator==(const VolumeRequest&) const = default;
 };
@@ -27,6 +35,11 @@ struct VolumeResult {
     bool active = false;
     unsigned remaining = 0;
     int alarm_volume = 50;
+#ifdef CONFIG_STUBUDDY_SCHEDULED
+    std::array<ReminderEntry, 4> records{};
+    int64_t now = 0;
+    unsigned error = 0;
+#endif
 #endif
 };
 

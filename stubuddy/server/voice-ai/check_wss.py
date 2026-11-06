@@ -11,7 +11,8 @@ from websockets.exceptions import InvalidStatus
 AUDIO = {"format": "opus", "sample_rate": 16000, "channels": 1, "frame_duration": 60}
 
 
-async def check(settings, controls=False, countdown=False):
+async def check(settings, controls=False, countdown=False, scheduled=False):
+    countdown = countdown or scheduled
     controls = controls or countdown
     url = f"wss://{settings['server_ip']}/stubuddy/ai"
     headers = {"Authorization": "Bearer " + settings["device_token"],
@@ -24,6 +25,7 @@ async def check(settings, controls=False, countdown=False):
                                           **({"device_controls": 1} if controls else {}),
                                           **({"volume_restore": 1} if controls else {}),
                                           **({"countdown": 1} if countdown else {}),
+                                          **({'scheduled': 1} if scheduled else {}),
                                           "audio_params": AUDIO}))
             hello = json.loads(await socket.recv())
             if (hello.get("ai_protocol") != 1 or hello.get("audio_params") != AUDIO or
@@ -33,6 +35,8 @@ async def check(settings, controls=False, countdown=False):
                 raise ValueError("Missing device controls support; update server first")
             if countdown and hello.get('countdown') != 1:
                 raise ValueError('Missing countdown support; update server first')
+            if scheduled and hello.get('scheduled') != 1:
+                raise ValueError('Missing scheduled reminder support; update server first')
             await socket.send('{"type":"ping"}')
             if json.loads(await socket.recv()).get("type") != "pong":
                 raise ValueError("Missing pong")
@@ -48,6 +52,8 @@ async def check(settings, controls=False, countdown=False):
         print("PASS: device_controls=1 volume_restore=1 negotiated; no physical volume changes performed")
     if countdown:
         print('PASS: countdown=1 negotiated; no physical countdown created')
+    if scheduled:
+        print('PASS: scheduled=1 negotiated; no physical reminder changed')
 
 
 if __name__ == "__main__":
@@ -55,8 +61,9 @@ if __name__ == "__main__":
     parser.add_argument("--config", type=Path, default=Path(__file__).with_name(".private.json"))
     parser.add_argument("--controls", action="store_true")
     parser.add_argument("--countdown", action="store_true")
+    parser.add_argument('--scheduled', action='store_true')
     args = parser.parse_args()
     try:
-        asyncio.run(check(json.loads(args.config.read_text(encoding="utf-8")), args.controls, args.countdown))
+        asyncio.run(check(json.loads(args.config.read_text(encoding="utf-8")), args.controls, args.countdown, args.scheduled))
     except Exception as error:
         raise SystemExit("FAIL: WSS readiness (" + type(error).__name__ + "); keep TLS verification enabled") from None

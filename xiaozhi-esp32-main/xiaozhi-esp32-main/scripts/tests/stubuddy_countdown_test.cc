@@ -80,15 +80,15 @@ int main() {
     assert(!interrupt.Update(false));
     assert(interrupt.Update(true));
     ReminderCycle cycle(1000);
-    assert(!cycle.Expired(60999) && cycle.Expired(61000));
+    assert(!cycle.Expired(180999) && cycle.Expired(181000));
     assert(!cycle.NextReady(6999, 4000));
     assert(cycle.NextReady(7000, 4000));
-    assert(!cycle.NextReady(61000, 57000));
+    assert(!cycle.NextReady(181000, 177000));
     // Waiting does not turn a 3s pause near the deadline into a 61s reminder.
-    assert(!cycle.NextReady(60999, 59000) && !cycle.NextReady(62000, 59000));
+    assert(!cycle.NextReady(180999, 179000) && !cycle.NextReady(182000, 179000));
     ReminderCycle wrapped(0xfffff000U);
-    assert(!wrapped.Expired(0xfffff000U + 59999U));
-    assert(wrapped.Expired(0xfffff000U + 60000U));
+    assert(!wrapped.Expired(0xfffff000U + 179999U));
+    assert(wrapped.Expired(0xfffff000U + 180000U));
     assert(wrapped.NextReady(0x500U, 0x500U - 3000U));
     ReminderCycle stopped(0);
     assert(stopped.Poll(1, false));
@@ -99,5 +99,5 @@ int main() {
     assert(decoding.Poll(90000, false, false));
     decoding.Begin(90000);
     assert(decoding.Poll(90001, false));
-    assert(!decoding.Poll(150000, false));
+    assert(!decoding.Poll(270000, false));
 }

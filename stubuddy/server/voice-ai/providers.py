@@ -8,6 +8,7 @@ import contextlib
 import json
 import re
 import uuid
+import logging
 from urllib.parse import urlsplit
 
 import httpx
@@ -15,6 +16,7 @@ from websockets.asyncio.client import connect
 from websockets.exceptions import InvalidStatus
 
 from audio import MAX_SAMPLES, wav_bytes
+LOG = logging.getLogger('stubuddy.ai')
 
 PROMPT = ("你是思巴迪，一个温和、耐心、面向小学生的纯语音伴学助手。"
           "默认用简洁普通话，每次通常不超过80个汉字、三个短句；需要时先问一个澄清问题。"
@@ -116,11 +118,27 @@ class DashScope:
         if self.client is None:
             self.client = httpx.AsyncClient(follow_redirects=False, trust_env=False,
                 limits=httpx.Limits(max_connections=4, max_keepalive_connections=4, keepalive_expiry=30))
-        response = await self.client.post(self.base + "/chat/completions", headers=self.headers,
-                                         json=body, timeout=httpx.Timeout(timeout, connect=10))
-        if response.status_code != 200:
-            # Never log response bodies, headers or exceptions containing request data.
-            raise ProviderFailure("http_" + str(response.status_code))
+        # ASR/LLM return data only. Retrying them cannot execute device tools.
+        # One retry shares the original deadline, and cancellation propagates
+        # through HTTP and the backoff. TTS streams/device writes never retry here.
+        stage = 'asr' if 'asr_options' in body else 'plan_or_tools' if 'tools' in body else 'llm'
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        async with asyncio.timeout(timeout):
+            for attempt in range(2):
+                remaining = timeout - (loop.time() - started)
+                if remaining <= 0: raise TimeoutError('Model request budget exhausted')
+                response = await self.client.post(self.base + "/chat/completions", headers=self.headers,
+                    json=body, timeout=httpx.Timeout(remaining, connect=min(10, remaining)))
+                if response.status_code == 200: break
+                status = response.status_code
+                await response.aclose()
+                retry = attempt == 0 and status in (500, 502, 503, 504)
+                LOG.warning('MODEL HTTP: stage=%s status=%s attempt=%s retry=%s elapsed_ms=%s',
+                    stage, status, attempt + 1, int(retry), round((loop.time() - started) * 1000))
+                if not retry:
+                    raise ProviderFailure('http_' + str(status))
+                await asyncio.sleep(0.2)
         message = response.json()["choices"][0]["message"]
         if not isinstance(message, dict):
             raise ValueError("Invalid completion message")

@@ -12,6 +12,9 @@
 #include "audio_levels.h"
 #include "countdown.h"
 #include "reminder_cycle.h"
+#ifdef CONFIG_STUBUDDY_SCHEDULED
+#include "scheduled_reminders.h"
+#endif
 #endif
 #ifdef CONFIG_STUBUDDY_AI_PTT
 #include "stubuddy_audio_codec.h"
@@ -53,8 +56,13 @@ stubuddy::WifiSetup wifi_setup;
 #endif
 #ifdef CONFIG_STUBUDDY_WS_ECHO
 #ifdef CONFIG_STUBUDDY_COUNTDOWN
+#ifdef CONFIG_STUBUDDY_SCHEDULED
+constexpr char kCheckpoint[] = "4.3.2 (one countdown, three weekly/once schedules)";
+stubuddy::ScheduledReminders countdown;
+#else
 constexpr char kCheckpoint[] = "4.3.1 (single countdown; independent reminder volume)";
 stubuddy::Countdown countdown;
+#endif
 bool countdown_boot_pending = false;
 #elif defined(CONFIG_STUBUDDY_AI_CONTROLS)
 constexpr char kCheckpoint[] = "4.2 (PTT volume tools and speech LED)";
@@ -126,6 +134,27 @@ bool CountdownDue() {
         return false;
     const bool boot_pending = countdown_boot_pending;
     countdown_boot_pending = false;
+#ifdef CONFIG_STUBUDDY_SCHEDULED
+    while (countdown.Due()) {
+        int64_t first = INT64_MAX;
+        for (const auto& entry : countdown.state().entries)
+            if (entry.deadline && entry.deadline <= now)
+                first = std::min(first, entry.deadline);
+        bool cached = true;
+        for (const auto& entry : countdown.state().entries)
+            if (entry.deadline == first)
+                cached &= ws_echo.ReminderReady(entry.id);
+        if (!boot_pending && wifi_setup.online() && ws_echo.ready() && cached)
+            return true;
+        std::array<stubuddy::ReminderEntry, 4> skipped;
+        unsigned count = 0;
+        countdown.Claim(skipped, count);
+        ESP_LOGI("STUBUDDY_TIMER",
+                 "SKIPPED: count=%u reason=%s; repeating plans advance; no catch-up", count,
+                 boot_pending ? "powered_off" : "offline_or_cache_unavailable");
+    }
+    return false;
+#else
     const auto decision =
         countdown.state().Decision(now, wifi_setup.online() && ws_echo.ready(),
                                    ws_echo.ReminderReady(countdown.state().id), boot_pending);
@@ -136,7 +165,30 @@ bool CountdownDue() {
                               : "offline or voice unavailable at deadline");
     }
     return decision == stubuddy::CountdownDecision::Play;
+#endif
 }
+#ifdef CONFIG_STUBUDDY_SCHEDULED
+void SyncReminders() {
+    static std::array<unsigned, 4> epochs{};
+    static std::array<std::array<char, 17>, 4> ids{};
+    const auto& entries = countdown.state().entries;
+    ws_echo.KeepReminders(entries);
+    if (!ws_echo.ready())
+        return;
+    for (unsigned i = 0; i < entries.size(); ++i) {
+        const auto& entry = entries[i];
+        if (!entry.deadline || ws_echo.ReminderReady(entry.id) ||
+            (epochs[i] == ws_echo.epoch() && !std::strcmp(ids[i].data(), entry.id)))
+            continue;
+        stubuddy::CountdownState clip;
+        std::strcpy(clip.id, entry.id);
+        std::strcpy(clip.text, entry.text);
+        ws_echo.SyncCountdown(clip);
+        std::strcpy(ids[i].data(), entry.id);
+        epochs[i] = ws_echo.epoch();
+    }
+}
+#endif
 #endif
 
 void IndicateStartupPlayback(bool playing) {
@@ -427,9 +479,14 @@ esp_err_t StreamReply(AudioCodec& codec, int16_t* pcm, size_t samples, stubuddy:
         if (ws_echo.TakeVolumeRequest(request)) {
 #ifdef CONFIG_STUBUDDY_COUNTDOWN
             if (request.action != stubuddy::TimerAction::None) {
-                ws_echo.CompleteVolumeRequest(
-                    countdown.Apply(request, request.action != stubuddy::TimerAction::Start ||
-                                                 ws_echo.ReminderReady(request.cache_id.data())));
+                const bool start = request.action == stubuddy::TimerAction::Start ||
+                                   request.action == stubuddy::TimerAction::ScheduledStart;
+                const auto result = countdown.Apply(
+                    request, !start || ws_echo.ReminderReady(request.cache_id.data()));
+#ifdef CONFIG_STUBUDDY_SCHEDULED
+                ws_echo.KeepReminders(countdown.state().entries);
+#endif
+                ws_echo.CompleteVolumeRequest(result);
                 continue;
             }
 #endif
@@ -565,10 +622,22 @@ esp_err_t StreamReply(AudioCodec& codec, int16_t* pcm, size_t samples, stubuddy:
 #ifdef CONFIG_STUBUDDY_COUNTDOWN
 esp_err_t PlayReminder(AudioCodec& codec, int16_t* pcm, stubuddy::PttButton& button,
                        std::vector<int16_t>& block, ReplayOutcome& outcome) {
-    const auto saved = countdown.state();
+    std::array<stubuddy::CountdownState, 4> clips{};
+    unsigned clip_count = 1;
+#ifdef CONFIG_STUBUDDY_SCHEDULED
+    std::array<stubuddy::ReminderEntry, 4> group;
+    const auto consumed = countdown.Claim(group, clip_count);
+    for (unsigned i = 0; i < clip_count; ++i) {
+        std::strcpy(clips[i].id, group[i].id);
+        clips[i].alarm_volume = countdown.state().alarm_volume;
+    }
+#else
+    clips[0] = countdown.state();
     // Claim once before physical output. A power cut during the announcement
     // must not resurrect the reminder on the next boot.
     const auto consumed = countdown.Consume();
+#endif
+    const auto& saved = clips[0];
     codec.EnableInput(false);
     codec.AbortOutput();
     ws_echo.Cancel();
@@ -591,7 +660,7 @@ esp_err_t PlayReminder(AudioCodec& codec, int16_t* pcm, stubuddy::PttButton& but
         stubuddy::PttButton& button;
         stubuddy::PlaybackInterrupt& interrupt;
         bool stopped = false;
-        bool limit_active = false, expired = false;
+        bool limit_active = false, expired = false, superseded = false;
         stubuddy::ReminderCycle cycle{0};
     } context{button, interrupt};
     const auto proceed = [](void* raw) {
@@ -601,30 +670,40 @@ esp_err_t PlayReminder(AudioCodec& codec, int16_t* pcm, stubuddy::PttButton& but
             c.cycle.Poll(Milliseconds(), c.interrupt.Update(c.button.pressed()), c.limit_active);
         c.stopped = c.cycle.stopped();
         c.expired = c.limit_active && c.cycle.Expired(Milliseconds());
-        return playing;
+#ifdef CONFIG_STUBUDDY_SCHEDULED
+        c.superseded = c.superseded || (c.limit_active && CountdownDue());
+#endif
+        return playing && !c.superseded;
     };
     ESP_LOGI("STUBUDDY_TIMER", "DUE: reminder wins; old recording/reply discarded; alarm_volume=%d",
              int(saved.alarm_volume));
-    ESP_RETURN_ON_ERROR(opus_loopback.StartStreamDecode(), kTag, "Reminder decoder reset failed");
-    size_t cursor = 0, index = 0, decoded = 0;
+    size_t decoded = 0;
+    std::array<size_t, 4> offsets{}, lengths{};
     std::array<uint8_t, 227> packet{};
-    stubuddy::echo::Metadata metadata;
-    while (proceed(&context)) {
-        size_t size = 0, copied = 0;
-        if (!ws_echo.ReadReminder(saved.id, cursor, packet.data(), size, metadata))
-            break;
-        ESP_RETURN_ON_ERROR(
-            opus_loopback.DecodeStreamPacket({packet.data(), size}, index++, metadata.delay,
-                                             metadata.samples, pcm, copied),
-            kTag, "Reminder decode failed");
-        decoded += copied;
+    for (unsigned clip = 0; clip < clip_count && proceed(&context); ++clip) {
+        ESP_RETURN_ON_ERROR(opus_loopback.StartStreamDecode(), kTag,
+                            "Reminder decoder reset failed");
+        size_t cursor = 0, index = 0;
+        offsets[clip] = decoded;
+        stubuddy::echo::Metadata metadata{};
+        while (proceed(&context)) {
+            size_t size = 0, copied = 0;
+            if (!ws_echo.ReadReminder(clips[clip].id, cursor, packet.data(), size, metadata))
+                break;
+            ESP_RETURN_ON_ERROR(
+                opus_loopback.DecodeStreamPacket({packet.data(), size}, index++, metadata.delay,
+                                                 metadata.samples, pcm + offsets[clip], copied),
+                kTag, "Reminder decode failed");
+            decoded += copied;
+            lengths[clip] += copied;
+        }
+        if (!context.stopped &&
+            (!lengths[clip] || lengths[clip] != metadata.samples || index != metadata.frames)) {
+            ESP_LOGW("STUBUDDY_TIMER", "PLAY FAILED: incomplete cached voice; no retry");
+            std::memset(pcm, 0, decoded * sizeof(int16_t));
+            return ESP_OK;
+        }
     }
-    if (!context.stopped && (!decoded || decoded != metadata.samples || index != metadata.frames)) {
-        ESP_LOGW("STUBUDDY_TIMER", "PLAY FAILED: incomplete cached voice; deleted without retry");
-        std::memset(pcm, 0, decoded * sizeof(int16_t));
-        return ESP_OK;
-    }
-    const auto levels = stubuddy::AnalyzeRecording(pcm, decoded);
     unsigned cycles = 0;
     context.cycle.Begin(Milliseconds());
     context.limit_active = true;
@@ -634,7 +713,8 @@ esp_err_t PlayReminder(AudioCodec& codec, int16_t* pcm, stubuddy::PttButton& but
         if (codec.HasOutputError() || !proceed(&context))
             break;
         status_led.SetState(stubuddy::LedState::Playback);
-        ESP_LOGI("STUBUDDY_TIMER", "REMINDER CYCLE: index=%u limit_ms=60000 gap_ms=3000", ++cycles);
+        ESP_LOGI("STUBUDDY_TIMER", "REMINDER CYCLE: index=%u items=%u limit_ms=180000 gap_ms=3000",
+                 ++cycles, clip_count);
         // Each cycle reuses the prepared PCM: no extra TTS calls or allocation.
         for (unsigned offset = 0; offset < 2400 && proceed(&context);) {
             const unsigned size = std::min<unsigned>(160, 2400 - offset);
@@ -652,15 +732,22 @@ esp_err_t PlayReminder(AudioCodec& codec, int16_t* pcm, stubuddy::PttButton& but
             break;
         output.SelectReminderOutput(saved.alarm_volume, true);
         status_led.SetState(stubuddy::LedState::SpeechPlayback);
-        for (size_t offset = 0; offset < decoded && proceed(&context);) {
-            block.resize(std::min<size_t>(stubuddy::kFramesPerBlock, decoded - offset));
-            for (size_t i = 0; i < block.size(); ++i)
-                block[i] =
-                    stubuddy::ReplaySample(pcm[offset + i], offset + i, decoded, levels, 160);
-            codec.OutputData(block);
+        for (unsigned clip = 0; clip < clip_count && proceed(&context); ++clip) {
+            const auto* samples = pcm + offsets[clip];
+            const auto length = lengths[clip];
+            const auto levels = stubuddy::AnalyzeRecording(samples, length);
+            for (size_t offset = 0; offset < length && proceed(&context);) {
+                block.resize(std::min<size_t>(stubuddy::kFramesPerBlock, length - offset));
+                for (size_t i = 0; i < block.size(); ++i)
+                    block[i] = stubuddy::ReplaySample(samples[offset + i], offset + i, length,
+                                                      levels, 160);
+                codec.OutputData(block);
+                if (codec.HasOutputError())
+                    break;
+                offset += block.size();
+            }
             if (codec.HasOutputError())
                 break;
-            offset += block.size();
         }
         if (!context.stopped && !codec.HasOutputError())
             output.FinishOutput(proceed, &context);
@@ -681,15 +768,16 @@ esp_err_t PlayReminder(AudioCodec& codec, int16_t* pcm, stubuddy::PttButton& but
     ESP_LOGI("STUBUDDY_TIMER", "REMINDER END: reason=%s; deleted; LED OFF; no replay queue",
              context.stopped          ? "button"
              : codec.HasOutputError() ? "audio_failure"
+             : context.superseded     ? "new_reminder"
              : context.expired        ? "timeout"
                                       : "complete");
     return ESP_OK;
 }
 #endif
 
-esp_err_t Replay(AudioCodec& codec, const int16_t* recording, size_t count,
-                 std::vector<int16_t>& block, unsigned round, stubuddy::PttButton& button,
-                 ReplayOutcome& outcome) {
+[[maybe_unused]] esp_err_t Replay(AudioCodec& codec, const int16_t* recording, size_t count,
+                                  std::vector<int16_t>& block, unsigned round,
+                                  stubuddy::PttButton& button, ReplayOutcome& outcome) {
     outcome = ReplayOutcome::Finished;
 #ifdef CONFIG_STUBUDDY_SOFTAP_SETUP
     stubuddy::PlaybackInterrupt interrupt(button.pressed());
@@ -788,7 +876,7 @@ esp_err_t RunPtt(AudioCodec& codec) {
 #endif
 #ifdef CONFIG_STUBUDDY_COUNTDOWN
     ESP_RETURN_ON_ERROR(countdown.Load(), kTag, "Countdown NVS load failed");
-    countdown_boot_pending = countdown.state().deadline != 0;
+    countdown_boot_pending = true;
 #endif
 #ifdef CONFIG_STUBUDDY_WS_ECHO
     ESP_RETURN_ON_ERROR(
@@ -811,7 +899,7 @@ esp_err_t RunPtt(AudioCodec& codec) {
     bool preserve_idle_key = false;
     unsigned preserved_epoch = 0;
     size_t dirty_samples = 0;
-#ifdef CONFIG_STUBUDDY_COUNTDOWN
+#if defined(CONFIG_STUBUDDY_COUNTDOWN) && !defined(CONFIG_STUBUDDY_SCHEDULED)
     unsigned countdown_sync_epoch = 0;
 #endif
     while (true) {
@@ -830,12 +918,16 @@ esp_err_t RunPtt(AudioCodec& codec) {
                 continue_capture = true;
             }
         }
+#ifdef CONFIG_STUBUDDY_SCHEDULED
+        SyncReminders();
+#else
         if (ws_echo.ready() && countdown.state().deadline &&
             !ws_echo.ReminderReady(countdown.state().id) &&
             countdown_sync_epoch != ws_echo.epoch()) {
             ws_echo.SyncCountdown(countdown.state());
             countdown_sync_epoch = ws_echo.epoch();
         }
+#endif
 #endif
         if (!continue_capture) {
             // Keep release gates dark. Reading the raw held key here must never
@@ -847,11 +939,15 @@ esp_err_t RunPtt(AudioCodec& codec) {
 #ifdef CONFIG_STUBUDDY_COUNTDOWN
             if (CountdownDue())
                 continue;
+#ifdef CONFIG_STUBUDDY_SCHEDULED
+            SyncReminders();
+#else
             if (countdown.state().deadline && !ws_echo.ReminderReady(countdown.state().id) &&
                 countdown_sync_epoch != ws_echo.epoch()) {
                 ws_echo.SyncCountdown(countdown.state());
                 countdown_sync_epoch = ws_echo.epoch();
             }
+#endif
 #endif
             const unsigned epoch = NetworkEpoch();
             const bool resume_idle =

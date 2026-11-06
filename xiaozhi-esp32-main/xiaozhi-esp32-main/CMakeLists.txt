@@ -23,7 +23,7 @@ if(BOARD_NAME STREQUAL "stubuddy-s3-n16r8-startup" OR
    BOARD_NAME STREQUAL "stubuddy-s3-n16r8-wifi-opus-ptt" OR
    BOARD_NAME STREQUAL "stubuddy-s3-n16r8-ws-echo" OR
    BOARD_NAME STREQUAL "stubuddy-s3-n16r8-wss-echo" OR
-   BOARD_NAME MATCHES "^stubuddy-s3-n16r8-ai-ptt(-(controls|countdown))?$")
+   BOARD_NAME MATCHES "^stubuddy-s3-n16r8-ai-ptt(-(controls|countdown|reminders))?$")
     idf_build_set_property(XIAOZHI_HEADLESS_STARTUP ON)
     idf_build_set_property(STUBUDDY_VALIDATION_VARIANT "${BOARD_NAME}")
     set(ENV{XIAOZHI_HEADLESS_STARTUP_PROFILE} "1")
@@ -32,18 +32,18 @@ if(BOARD_NAME STREQUAL "stubuddy-s3-n16r8-wifi-ptt" OR
    BOARD_NAME STREQUAL "stubuddy-s3-n16r8-wifi-opus-ptt" OR
    BOARD_NAME STREQUAL "stubuddy-s3-n16r8-ws-echo" OR
    BOARD_NAME STREQUAL "stubuddy-s3-n16r8-wss-echo" OR
-   BOARD_NAME MATCHES "^stubuddy-s3-n16r8-ai-ptt(-(controls|countdown))?$")
+   BOARD_NAME MATCHES "^stubuddy-s3-n16r8-ai-ptt(-(controls|countdown|reminders))?$")
     set(ENV{XIAOZHI_STUBUDDY_WIFI_PROFILE} "1")
 endif()
 if(BOARD_NAME STREQUAL "stubuddy-s3-n16r8-wifi-opus-ptt" OR
    BOARD_NAME STREQUAL "stubuddy-s3-n16r8-ws-echo" OR
    BOARD_NAME STREQUAL "stubuddy-s3-n16r8-wss-echo" OR
-   BOARD_NAME MATCHES "^stubuddy-s3-n16r8-ai-ptt(-(controls|countdown))?$")
+   BOARD_NAME MATCHES "^stubuddy-s3-n16r8-ai-ptt(-(controls|countdown|reminders))?$")
     set(ENV{XIAOZHI_STUBUDDY_OPUS_PROFILE} "1")
 endif()
 if(BOARD_NAME STREQUAL "stubuddy-s3-n16r8-ws-echo" OR
    BOARD_NAME STREQUAL "stubuddy-s3-n16r8-wss-echo" OR
-   BOARD_NAME MATCHES "^stubuddy-s3-n16r8-ai-ptt(-(controls|countdown))?$")
+   BOARD_NAME MATCHES "^stubuddy-s3-n16r8-ai-ptt(-(controls|countdown|reminders))?$")
     set(ENV{XIAOZHI_STUBUDDY_WS_PROFILE} "1")
 endif()
 
