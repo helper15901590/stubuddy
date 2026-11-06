@@ -1,4 +1,5 @@
 """Spoken help from negotiated capabilities, never a device operation."""
+from prompt_store import wording
 import re
 
 
@@ -12,23 +13,22 @@ def answer(query, controls=False, restore=False, countdown=False, scheduled=Fals
         return None
     if reminder:
         if scheduled:
-            return ('可以设置一个一分钟到二十四小时的倒计时，以及最多三个一次性或每周指定星期提醒。'
-                    '例如，每周一晚上八点提醒我看书。你也可以查询提醒，或说取消第一条提醒；提醒音量可以单独调节。')
+            return (wording('capabilities.reply.answer.001'))
         if countdown:
-            return '可以设置一个一分钟到二十四小时的倒计时，例如提醒我十分钟后喝水，也能查询、取消和单独调节提醒音量。'
-        return '当前设备还没有开放提醒功能，可以先和我语音聊天或一起学习。'
+            return wording('capabilities.reply.answer.002')
+        return wording('capabilities.reply.answer.003')
     if volume:
         if not controls:
-            return '当前设备还没有开放语音调节音量。'
-        return ('可以问当前音量，或说音量调到五十、大一点、小一点、静音。' +
-                ('说恢复音量，可以恢复静音前的音量。' if restore else '') +
-                ('提醒音量可以单独设置。' if countdown else ''))
-    parts = ['我能陪你语音聊天、讲故事、解释知识，一起练习学习题目。']
+            return wording('capabilities.reply.answer.004')
+        return (wording('capabilities.reply.answer.005') +
+                (wording('capabilities.reply.answer.006') if restore else '') +
+                (wording('capabilities.reply.answer.007') if countdown else ''))
+    parts = [wording('capabilities.reply.introduction')]
     if controls:
-        parts.append('还能查询、调节或静音对话音量' + ('，并恢复静音前音量。' if restore else '。'))
+        parts.append(wording('capabilities.reply.answer.008') + (wording('capabilities.reply.answer.009') if restore else '。'))
     if scheduled:
-        parts.append('可以设置一个倒计时和最多三个一次性或每周提醒，查询、逐条取消，并单独调节提醒音量。')
+        parts.append(wording('capabilities.reply.answer.010'))
     elif countdown:
-        parts.append('可以设置、查询、取消一个倒计时，并单独调节提醒音量。')
-    parts.append('按住按键说话，松开发送；播报时重新按键可以打断。')
+        parts.append(wording('capabilities.reply.answer.011'))
+    parts.append(wording('capabilities.reply.answer.012'))
     return ''.join(parts)

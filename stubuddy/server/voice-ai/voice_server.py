@@ -1,4 +1,5 @@
 """stubuddy ai/1: cancellable PTT ASR -> LLM -> TTS with an eight-round window."""
+from prompt_store import wording, overridden, snapshot
 import argparse
 import asyncio
 import contextlib
@@ -41,10 +42,11 @@ class VoiceService:
             raise ValueError("Invalid private device token")
         self.provider = provider if provider is not None else DashScope(settings)
         self.decode, self.encode = codec if codec is not None else (decode, encode)
-        self.prompt = settings.get("prompt", PROMPT)
+        self.prompt = PROMPT if overridden('providers.prompt.global.001') else settings.get("prompt", PROMPT)
         if not isinstance(self.prompt, str) or not 1 <= len(self.prompt) <= 4000:
             raise ValueError("Invalid system prompt")
         self.prompt += '\n' + SPOKEN_INSTRUCTION  # Also applies to existing private custom prompts.
+        LOG.info('PROMPTS READY revision=%s overrides=%s; contents not logged', snapshot()[2], len(snapshot()[1]))
         self.rounds = settings.get("history_rounds", 8)
         self.budget = settings.get("history_bytes", 64000)
         History(self.rounds, self.budget)  # Validate before accepting connections.
@@ -182,8 +184,8 @@ class VoiceService:
                         help_answer = capabilities.answer(query, device_controls, volume_restore, countdown, scheduled)
                         clock_request = clock_answers.intent(query)
                         facts = capabilities.answer('你有哪些功能？', device_controls, volume_restore, countdown, scheduled)
-                        messages = history.messages(self.prompt + '\n本次连接实际开放的功能：' + facts +
-                            '\n普通聊天不能声称已经创建、修改、取消或删除设备提醒，也不能声称已经改变设备音量。', query)
+                        messages = history.messages(self.prompt + wording('voice_server.prompt.respond.001') + facts +
+                            wording('voice_server.prompt.respond.002'), query)
                         is_reminder = scheduled and not help_answer and not clock_request and reminder_tools.intent(query, messages, reminder_view)
                         is_countdown = countdown and not scheduled and not help_answer and countdown_tools.intent(query, messages)
                         domain = 'help' if help_answer else 'reminders' if is_reminder else 'countdown' if is_countdown else (

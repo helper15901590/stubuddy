@@ -1,4 +1,5 @@
 """One device-owned countdown; prepared voice and acknowledged tools only."""
+from prompt_store import wording
 import base64
 import json
 import re
@@ -14,7 +15,7 @@ GET = "self.countdown.get"
 START = "self.countdown.start"
 CANCEL = "self.countdown.cancel"
 VOLUME = "self.countdown.volume"
-RANGE_REPLY = '倒计时时长要在一分钟到二十四小时之间，请重新告诉我要设置多久。'
+RANGE_REPLY = wording('countdown_tools.reply.global.001')
 
 
 def normalize(text):
@@ -139,12 +140,11 @@ async def answer(provider, messages, execute, prepare):
     if re.search(r"(?:提醒|闹钟)(?:的)?音量", query) or (alarm_context(messages) and
             (short_setting(query) or short_restore(query) or re.search(r'大一点|小一点|大声一点|小声一点', query))):
         if short_restore(query):
-            return '请直接告诉我要把提醒音量调到多少。'
+            return wording('countdown_tools.reply.answer.002')
         if not re.search(r"调|设|静音|大一点|小一点|大声|小声", query):
-            return f"当前提醒音量是百分之{chinese_volume(status['alarm_volume'])}。"
+            return wording('countdown_tools.reply.answer.003', p0=(chinese_volume(status['alarm_volume'])))
         schema = {"volume": {"type": "integer", "minimum": 0, "maximum": 100}}
-        instruction = ("提取提醒音量为0到100的整数。静音为0，大一点加10，小一点减10，"
-                       f"当前提醒音量为{status['alarm_volume']}。这里只修改提醒音量。")
+        instruction = (wording('countdown_tools.prompt.answer.004', p0=(status['alarm_volume'])))
         values = await plan(provider, messages, instruction, schema, ["volume"])
         volume = values.get("volume")
         if re.search(r'小一点|小声一点', query): volume = max(0, status['alarm_volume'] - 10)
@@ -156,27 +156,23 @@ async def answer(provider, messages, execute, prepare):
         validate_status(result)
         if result['alarm_volume'] != volume:
             raise ValueError("Alarm volume acknowledgement mismatch")
-        return f"已将提醒音量调整到百分之{chinese_volume(volume)}。"
+        return wording('countdown_tools.reply.answer.005', p0=(chinese_volume(volume)))
     if re.search(r"取消|删除|停止|关掉|关闭", query):
         result = await execute(CANCEL, {})
         validate_status(result)
         if result['active']:
             raise ValueError("Countdown cancellation not confirmed")
-        return "倒计时已取消。" if status['active'] else "现在没有正在进行的倒计时。"
+        return wording('countdown_tools.reply.answer.006') if status['active'] else wording('countdown_tools.reply.answer.007')
     if query_intent(query):
-        return (f"倒计时还剩{spoken_duration(max(1, status['remaining']))}。" if status['active']
-                else "现在没有正在进行的倒计时。")
+        return (wording('countdown_tools.reply.answer.008', p0=(spoken_duration(max(1, status['remaining'])))) if status['active']
+                else wording('countdown_tools.reply.answer.007'))
     seconds_from_query = duration_seconds(query)
     if seconds_from_query is not None and (not 60 <= seconds_from_query <= 86400 or seconds_from_query % 1):
         return RANGE_REPLY
     if status['active']:
-        return "现在已经有一个倒计时啦，请先取消它，再设置新的。"
+        return wording('countdown_tools.reply.answer.009')
     values = await plan(provider, messages,
-        "只提取本轮明确要求创建的相对倒计时；未指定时长或仅问知识时seconds为0。"
-        "seconds是总秒数，只允许60到86400；范围外保留实际数值，不替用户修改。"
-        "text是到点时由思巴迪说的一句温暖、拟人化提醒，最多40字，例如"
-        "‘喝水时间到啦，喝两口水润润嗓子吧。’。只写直接朗读的正文，不写括号、语气或动作说明。"
-        "若包含多个不同截止时间，请返回seconds为0，让用户一次设置一个。不使用精确钟点或日期设置提醒。",
+        wording('countdown_tools.prompt.answer.010'),
         {"seconds": {"type": "integer"}, "text": {"type": "string", "maxLength": 40}},
         ["seconds", "text"])
     seconds, text = values.get('seconds'), values.get('text')
@@ -193,7 +189,7 @@ async def answer(provider, messages, execute, prepare):
     validate_status(result)
     if not result['active'] or result['remaining'] > seconds or result['remaining'] < seconds - 5:
         raise ValueError("Countdown start not confirmed")
-    return f"好呀，{spoken_duration(seconds)}的倒计时开始啦，到时我会提醒你。"
+    return wording('countdown_tools.reply.answer.011', p0=(spoken_duration(seconds)))
 
 
 def validate_status(result):

@@ -2,6 +2,7 @@
 
 No model is hosted on this ECS. API secrets never enter device messages or logs.
 """
+from prompt_store import wording
 import asyncio
 import base64
 import contextlib
@@ -18,16 +19,9 @@ from websockets.exceptions import InvalidStatus
 from audio import MAX_SAMPLES, wav_bytes
 LOG = logging.getLogger('stubuddy.ai')
 
-PROMPT = ("你是思巴迪，一个温和、耐心、面向小学生的纯语音伴学助手。"
-          "默认用简洁普通话，每次通常不超过80个汉字、三个短句；需要时先问一个澄清问题。"
-          "解释知识时给具体例子，鼓励孩子自己思考，不编造事实。"
-          "只输出适合直接朗读的正文，不输出Markdown、表情或思考过程。"
-          "用自然亲切的口语体现角色，不写括号中的动作、语气或舞台说明。"
-          "遇到危险或明显不适龄内容时提供安全帮助，必要时建议找家长或老师。")
+PROMPT = (wording('providers.prompt.global.001'))
 
-SPOKEN_INSTRUCTION = ("只输出可以直接朗读的自然口语，不写括号里的动作、语气或舞台说明，"
-                      "例如不要写（轻快地）或（微笑）。设备倒计时只有经过设备工具成功回执才算创建，"
-                      "普通聊天不能声称已经开始计时或会到点提醒。")
+SPOKEN_INSTRUCTION = (wording('providers.prompt.global.002'))
 
 
 def clean_spoken_text(text):

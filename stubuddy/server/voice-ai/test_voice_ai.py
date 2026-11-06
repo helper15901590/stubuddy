@@ -134,6 +134,7 @@ class ConfigurationTests(unittest.TestCase):
                   "api_key": "staged-fixture", "tts_rate": 1.0}
         server = {**staged, "api_key": "server-fixture", "tts_rate": 0.9}
         for name in install_ecs.FILES:
+            (root / name).parent.mkdir(parents=True, exist_ok=True)
             (root / name).write_text("# new code fixture\n")
         (root / ".private.json").write_text(json.dumps(staged))
         (target / ".private.json").write_text(json.dumps(server))
@@ -187,6 +188,7 @@ class ConfigurationTests(unittest.TestCase):
             (echo / "echo_protocol.py").write_text("# protocol fixture\n")
             (echo / ".cloud.json").write_text("existing echo fixture")
             for name in configure.FILES:
+                (root / name).parent.mkdir(parents=True, exist_ok=True)
                 (root / name).write_text("# fixture\n")
             firmware = Path(directory) / "firmware"
             settings = {"device_token": "0" * 64, "api_key": "fixture-not-a-real-key"}

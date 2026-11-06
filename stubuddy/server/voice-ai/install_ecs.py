@@ -9,12 +9,13 @@ import shutil
 import socket
 import subprocess
 import time
+from prompt_store import load as validate_prompts
 
 ROOT = Path(__file__).resolve().parent
 TARGET = Path("/opt/stubuddy-ai")
 UNIT = Path("/etc/systemd/system/stubuddy-ai.service")
 MARK = "    # stubuddy-ai managed location"
-FILES = ("voice_server.py", "history.py", "audio.py", "providers.py", "device_tools.py", "capabilities.py", "clock_answers.py", "calendar_input.py", "countdown_tools.py", "reminder_tools.py", "reminder_smoke.py", "requirements.txt", "echo_protocol.py", "smoke_test.py", "countdown_smoke.py", ".private.json")
+FILES = ("prompt_admin.py", "prompt_store.py", "prompts/defaults.json", "voice_server.py", "history.py", "audio.py", "providers.py", "device_tools.py", "capabilities.py", "clock_answers.py", "calendar_input.py", "countdown_tools.py", "reminder_tools.py", "reminder_smoke.py", "requirements.txt", "echo_protocol.py", "smoke_test.py", "countdown_smoke.py", ".private.json")
 
 
 def run(*arguments):
@@ -72,11 +73,13 @@ def copy_payload(replace_config=False):
     for file in FILES:
         if file == ".private.json" and (TARGET / file).is_file() and not replace_config:
             continue
+        (TARGET / file).parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(ROOT / file, TARGET / file)
     os.chmod(TARGET / ".private.json", 0o600)
 
 
 def preflight(replace_config=False):
+    validate_prompts(ROOT / 'prompts/defaults.json', TARGET / '.prompt-overrides.json')
     if os.name != "posix" or os.geteuid() != 0:
         raise ValueError("Run through SSH with root/sudo")
     release = Path("/etc/os-release").read_text()

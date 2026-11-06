@@ -299,3 +299,8 @@ if ($LASTEXITCODE -ne 0) { throw '回退核对失败，先不烧录。' }
 - [CosyVoice WebSocket](https://help.aliyun.com/zh/model-studio/cosyvoice-websocket-api)
 - [系统音色列表](https://help.aliyun.com/zh/model-studio/cosyvoice-voice-list)
 - [克隆音色与合成目标模型匹配](https://help.aliyun.com/en/model-studio/cosyvoice-clone-api-reference)
+# 提示词运营入口（检查点A）
+
+默认提示词与固定回复见 [prompts/README.md](prompts/README.md)，109条默认文案位于 `prompts/defaults.json`。独立覆盖文件为 `.prompt-overrides.json`，不进入Git或部署包；部署前校验与新默认文件的兼容性。使用 `python prompt_store.py --overrides 候选文件` 检查，服务器root运行 `python prompt_admin.py --apply 候选文件` 安装并重启；`--rollback`恢复上一份覆盖。修改文件后必须重启才能生效，重启清空服务器RAM对话历史。
+
+默认文案原样迁移，音量/提醒参数约束、PTT和八轮历史规则仍由代码执行。145项本地软件检查通过，默认文案36轮模拟设备检查通过；本阶段云端、覆盖加载与回退真机验收待用户执行。尚未实施MCP检查点B。

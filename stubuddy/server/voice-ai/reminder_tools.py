@@ -1,4 +1,5 @@
 """Bounded reminder tools. The device owns plans, deadlines and final validation."""
+from prompt_store import wording
 from datetime import datetime, timedelta, timezone
 import re
 import secrets
@@ -40,21 +41,21 @@ def timer_without_subject(source):
     return bool(re.fullmatch(r'(?:请|帮我|给我|麻烦|设置|设定|设|启动|开始|一个|个|倒计时|计时|提醒我|叫我|之后|以后|后|吧|一下|钟)*', remainder))
 
 
-def clock_value(text):
+def clock_value(text, *, codes=False):
     """Only user-spoken clock evidence may supply a calendar time. None != 00:00."""
     try: text = normalize_calendar(text)
-    except CalendarInputError: return None, '请把日期和具体时间分开说清楚。'
+    except CalendarInputError: return None, ('reminder_tools.reply.clock_value.001' if codes else wording('reminder_tools.reply.clock_value.001'))
     matches = list(CLOCK_PATTERN.finditer(text))
-    if not matches: return None, '请告诉我具体几点提醒，例如晚上八点。'
-    if len(matches) != 1: return None, '请一次设置一个提醒时间。'
+    if not matches: return None, ('reminder_tools.reply.clock_value.002' if codes else wording('reminder_tools.reply.clock_value.002'))
+    if len(matches) != 1: return None, ('reminder_tools.reply.clock_value.003' if codes else wording('reminder_tools.reply.clock_value.003'))
     period, hour, colon, tail = matches[0].groups()
     hour = int(old.number(hour))
     minute = int(colon) if colon else {'半': 30, '一刻': 15, '三刻': 45, '整': 0, None: 0}.get(tail)
     if minute is None: minute = int(old.number(tail.removesuffix('分')))
     if not 0 <= hour <= 23 or not 0 <= minute < 60:
-        return None, '请告诉我有效的几点几分。'
+        return None, ('reminder_tools.reply.clock_value.004' if codes else wording('reminder_tools.reply.clock_value.004'))
     if not period and not colon and 1 <= hour <= 12:
-        return None, '请说明是早上、中午还是晚上几点。'
+        return None, ('reminder_tools.reply.clock_value.005' if codes else wording('reminder_tools.reply.clock_value.005'))
     if period in ('下午', '傍晚', '晚上', '晚间', '夜里', '夜间'):
         if hour < 12: hour += 12
         elif hour == 12 and period != '下午': hour = 0
@@ -195,7 +196,7 @@ def time_words(timestamp, now):
     date = '今天' if delta == 0 else '明天' if delta == 1 else (
         (f'{when.year}年' if when.year != today.year else '') + f'{when.month}月{when.day}日')
     clock = f'{chinese_volume(when.hour)}点' + (f'{chinese_volume(when.minute)}分' if when.minute else '' if when.second else '整')
-    return date + clock + (f'{chinese_volume(when.second)}秒' if when.second else '')
+    return date + clock + (wording('reminder_tools.reply.time_words.006', p0=(chinese_volume(when.second))) if when.second else '')
 
 
 def rule_words(row):
@@ -205,13 +206,13 @@ def rule_words(row):
     days = '、'.join('一二三四五六日'[day] for day in range(7) if mask & (1 << day))
     prefix = '每天' if mask == 127 else f'每周{days}'
     minute = row['minute'] % 60
-    return prefix + chinese_volume(row['minute'] // 60) + '点' + (chinese_volume(minute) + '分' if minute else '整') + '，'
+    return prefix + chinese_volume(row['minute'] // 60) + wording('reminder_tools.reply.rule_words.007') + (chinese_volume(minute) + wording('reminder_tools.reply.rule_words.008') if minute else wording('reminder_tools.reply.rule_words.009')) + '，'
 
 
 def remaining_words(seconds):
     days, rest = divmod(seconds, 86400)
     prefix = (chinese_volume(days) if days <= 100 else str(days)) + '天' if days else ''
-    return prefix + old.spoken_duration(rest) if seconds else '不到一秒'
+    return prefix + old.spoken_duration(rest) if seconds else wording('reminder_tools.reply.remaining_words.010')
 
 
 def listing(status, view):
@@ -219,9 +220,9 @@ def listing(status, view):
     # Snapshot IDs stay attached to the spoken numbers across later changes.
     view['ids'] = [row['id'] for row in ordered]
     if not ordered:
-        return '现在没有提醒。'
-    return ''.join(f'第{chinese_volume(i)}条，{row["item"]}，{rule_words(row)}'
-                   f'{"下次" if row["weekdays"] else ""}{time_words(row["deadline"], status["now"])}提醒。'
+        return wording('reminder_tools.reply.listing.011')
+    return ''.join(wording('reminders.reply.list_entry', p0=chinese_volume(i), p1=row['item'], p2=rule_words(row),
+                          p3='下次' if row['weekdays'] else '', p4=time_words(row['deadline'], status['now']))
                    for i, row in enumerate(ordered, 1))
 
 
@@ -276,20 +277,20 @@ async def answer(provider, messages, execute, prepare, view):
     try: query = normalize_calendar(old.normalize(messages[-1]['content']))
     except CalendarInputError:
         view.pop('draft', None)
-        return '日期和时间格式不明确，请把日期和几点几分分开说清楚。'
+        return wording('reminder_tools.reply.answer.012')
     operation = action(query, messages, view)
     if operation is None:
-        return '请明确告诉我是要查询、设置还是取消提醒。'
+        return wording('reminder_tools.reply.answer.013')
     if operation == 'orphan':
-        return '当前没有待补全的提醒设置，请完整说出提醒事项和时间。'
+        return wording('reminder_tools.reply.answer.014')
     if operation == 'clarify_query':
         view['query_clarification'] = {'expires': time.monotonic() + 60}
-        return '你是在问现在有多少条提醒吗？请说是的或不是。'
+        return wording('reminder_tools.reply.answer.015')
     if operation == 'decline_query':
-        return '好的，请重新说一下你的问题。'
+        return wording('reminder_tools.reply.answer.016')
     if operation == 'discard':
         view.pop('draft', None)
-        return '这次尚未完成的提醒设置已取消。'
+        return wording('reminder_tools.reply.answer.017')
     if operation not in ('cancel', 'bulk'):
         view.pop('cancel_until', None)
     if operation == 'cancel':
@@ -302,11 +303,11 @@ async def answer(provider, messages, execute, prepare, view):
     # Alarm volume still uses the accepted actual-device acknowledgement path.
     if operation == 'volume':
         if short_restore(query):
-            return '请直接告诉我要把提醒音量调到多少。'
+            return wording('reminder_tools.reply.answer.018')
         if not re.search('调|设|静音|大一点|小一点|大声|小声', query):
-            return f'当前提醒音量是百分之{chinese_volume(status["alarm_volume"])}。'
+            return wording('reminder_tools.reply.answer.019', p0=(chinese_volume(status['alarm_volume'])))
         values = await old.plan(provider, messages,
-            f'只提取提醒音量volume，整数0到100。静音为0，大一点加10，小一点减10。当前{status["alarm_volume"]}。',
+            wording('reminder_tools.prompt.answer.020', p0=(status['alarm_volume'])),
             {'volume': {'type': 'integer', 'minimum': 0, 'maximum': 100}}, ['volume'])
         volume = values.get('volume')
         if '静音' in query: volume = 0
@@ -318,51 +319,50 @@ async def answer(provider, messages, execute, prepare, view):
         validate_status(result)
         if not result['ok'] or result['alarm_volume'] != volume:
             raise ValueError('Reminder volume not confirmed')
-        return f'已将提醒音量调整到百分之{chinese_volume(volume)}。'
+        return wording('reminder_tools.reply.answer.021', p0=(chinese_volume(volume)))
     if operation == 'count':
         total = len(status['records'])
         timers = sum(row['kind'] == 'countdown' for row in status['records'])
-        return (f'现在共有{chinese_volume(total)}条提醒，其中{chinese_volume(timers)}个倒计时、'
-                f'{chinese_volume(total - timers)}个定时提醒。') if total else '现在没有提醒。'
+        return (wording('reminder_tools.reply.answer.022', p0=(chinese_volume(total)), p1=(chinese_volume(timers)), p2=(chinese_volume(total - timers)))) if total else wording('reminder_tools.reply.listing.011')
     if operation == 'bulk':
         view.pop('draft', None)
         if status['records']: view['cancel_until'] = time.monotonic() + DRAFT_SECONDS
         else: view.pop('cancel_until', None)
-        return ('目前一次只能取消一条，请说取消第几条提醒。' + listing(status, view)
+        return (wording('reminder_tools.reply.answer.023') + listing(status, view)
                 if status['records'] else listing(status, view))
     cancel, remaining, subject = (operation == key for key in ('cancel', 'remaining', 'subject'))
     if cancel or remaining or subject:
         if subject and '定时' in query and '倒计时' not in query and not any(row['kind'] == 'scheduled' for row in status['records']):
-            return '现在没有定时提醒。'
+            return wording('reminder_tools.reply.answer.024')
         if not status['records']:
             return listing(status, view)
         chosen = select(query, status, view)
         if not chosen:
             if cancel: view['cancel_until'] = time.monotonic() + DRAFT_SECONDS
-            return '请告诉我要操作哪一条。' + listing(status, view)
+            return wording('reminder_tools.reply.answer.025') + listing(status, view)
         if cancel:
             view.pop('draft', None)
             result = await execute(CANCEL, {'cache_id': chosen['id']})
             validate_status(result)
             if not result['ok']:
-                return '这条提醒已经变化，请重新确认。' + listing(result, view)
+                return wording('reminder_tools.reply.answer.026') + listing(result, view)
             if any(row['id'] == chosen['id'] for row in result['records']):
                 raise ValueError('Cancellation not confirmed')
             view.pop('cancel_until', None)
-            return f'已取消{rule_words(chosen)}{chosen["item"]}提醒。'
+            return wording('reminder_tools.reply.answer.027', p0=(rule_words(chosen)), p1=(chosen['item']))
         if remaining:
             seconds = max(0, chosen['deadline'] - status['now'])
-            return f'{chosen["item"]}提醒还剩{remaining_words(seconds)}。'
-        return f'提醒你{chosen["item"]}。'
+            return wording('reminder_tools.reply.answer.028', p0=(chosen['item']), p1=(remaining_words(seconds)))
+        return wording('reminder_tools.reply.answer.029', p0=(chosen['item']))
     if operation == 'list':
         return listing(status, view)
     if operation == 'clarify':
-        return '你是想查询已有提醒，还是设置新提醒？设置时请告诉我事项和时间。'
+        return wording('reminder_tools.reply.answer.030')
     if operation not in ('create', 'complete'):
-        return '请明确告诉我要设置的提醒事项和时间。'
+        return wording('reminder_tools.reply.answer.031')
     if '工作日' in query or '调休' in query or '节假日' in query:
         view.pop('draft', None)
-        return '目前支持一次性和每周指定星期提醒，请明确说出星期几。'
+        return wording('reminder_tools.reply.answer.032')
     # Only an explicit pending task can provide omitted fields. Completed chat
     # pairs (including previously refused requests) are never planning input.
     draft = live_draft(view) if operation == 'complete' else None
@@ -371,7 +371,7 @@ async def answer(provider, messages, execute, prepare, view):
     source = (draft['source'] + '\n补充：' + query) if draft['source'] else query
     if len(source.encode()) > 6000:
         view.pop('draft', None)
-        return '请用一句话重新告诉我提醒事项和时间。'
+        return wording('reminder_tools.reply.answer.033')
     draft['source'] = source
     draft['timer'] = draft.get('timer', False) or '倒计时' in query
     # Calendar/weekday evidence always wins over duration-looking ASR fragments.
@@ -385,9 +385,9 @@ async def answer(provider, messages, execute, prepare, view):
     if draft.get('clock_fragment') and re.fullmatch(r'\s*(?:早上|上午|中午|下午|晚上|凌晨)[。！？!?\s]*', query):
         minute, time_question = clock_value(compact(query) + draft['clock_fragment'])
         draft['minute'] = minute
-    if minute is None and time_question.startswith('请说明是'):
+    if minute is None and clock_value(query, codes=True)[1] == 'reminder_tools.reply.clock_value.005':
         draft['clock_fragment'] = CLOCK_PATTERN.search(query)[0].strip()
-    clock_present = minute is not None or time_question != '请告诉我具体几点提醒，例如晚上八点。'
+    clock_present = minute is not None or clock_value(query, codes=True)[1] != 'reminder_tools.reply.clock_value.002'
     explicit_duration = minute is None and '后' in query and re.search(r'小时|钟头|分钟|秒', query)
     calendar_context = bool(re.search(r'年|月|[日号]|每周|星期|礼拜|今天|明天|后天|上午|下午|晚上|早上|凌晨|中午', query))
     if not weekday_context and seconds_from_query is not None and ('倒计时' in query or explicit_duration or
@@ -398,17 +398,17 @@ async def answer(provider, messages, execute, prepare, view):
     if draft['timer'] and not weekday_context and seconds is None:
         draft['need'] = 'duration'
         view['draft'] = draft
-        return '请告诉我倒计时多久，时长为一分钟到二十四小时。'
+        return wording('reminder_tools.reply.answer.034')
     if relative and seconds is not None and (not 60 <= seconds <= 86400 or seconds % 1):
         draft.update(seconds=None, timer=True, need='duration')
         view['draft'] = draft
         return old.RANGE_REPLY
     if relative and any(row['kind'] == 'countdown' for row in status['records']):
         view.pop('draft', None)
-        return '现在已经有一个倒计时啦，请先取消它，再设置新的。'
+        return wording('reminder_tools.reply.answer.035')
     if not relative and sum(row['kind'] == 'scheduled' for row in status['records']) >= 3:
         view.pop('draft', None)
-        return '最多只能设置三个定时提醒，请先取消一条。'
+        return wording('reminder_tools.reply.answer.036')
     if not relative:
         # An explicitly ambiguous replacement must not inherit an older time.
         if re.search(r'点|[:：]|时', query) and re.search(r'[零〇一二两三四五六七八九十\d](?:点|[:：]|时)', query):
@@ -425,44 +425,36 @@ async def answer(provider, messages, execute, prepare, view):
             spoken_date = date_value(query, status['now'])
         except (ValueError, OverflowError):
             view.pop('draft', None)
-            return '请告诉我有效的提醒日期。'
+            return wording('reminder_tools.reply.answer.037')
         if spoken_date: draft['date'] = spoken_date
         if draft['minute'] is None:
             view['draft'] = draft
             return time_question
         if draft['weekly'] and draft['weekdays'] is None:
             view['draft'] = draft
-            return '请告诉我每周哪几天提醒你。'
+            return wording('reminder_tools.reply.answer.038')
         if not draft['weekly'] and not draft['date'] and re.search(r'(?:下周|本周|这周|星期|礼拜|周[一二三四五六日天])', source):
             view['draft'] = draft
-            return '请明确说出提醒的日期，或者说每周哪几天。'
+            return wording('reminder_tools.reply.answer.039')
     # Retain explicit fields if a later clarification asks for a different date
     # or missing subject; never retrieve them from completed conversation pairs.
     view['draft'] = draft
     default_timer = relative and timer_without_subject(source)
     if operation == 'complete' and draft.get('need') == 'item' and compact(query) in (
             '那是', '那个', '这个', '是', '是的', '对', '好的', '嗯', '啊'):
-        return '没有听清提醒事项，请说具体要做什么，例如喝水或吃饭。'
+        return wording('reminder_tools.reply.answer.040')
     # A bare "提醒我" has no subject. Ask before calling the model, even when
     # the previous turn supplied only the date and this turn supplied a clock.
     subjects = re.findall(r'(?:提醒我|叫我)([^。！？!?\n]*)', source)
     supplied_subject = operation == 'complete' and draft.get('need') == 'item' and not re.search(r'提醒我|叫我', query)
     if subjects and not any(subject.strip() for subject in subjects) and not supplied_subject and not default_timer:
         draft['need'] = 'item'
-        return '请补充要提醒你做什么，例如提醒我喝水。'
+        return wording('reminder_tools.reply.answer.041')
     now = datetime.fromtimestamp(status['now'], TZ)
-    instruction = (f'现在北京时间{now.isoformat()}。仅提取本轮要求创建的一条提醒。'
-        'kind为countdown或scheduled。相对时长使用seconds；明确钟点使用time，格式HH:MM，24小时制。'
-        'date为YYYY-MM-DD；今天明天按当前北京时间解析；未说日期留空。'
-        'weekdays为ISO星期1到7数组：一次性为空，每周指定日填写对应数字，每天为1到7。'
-        '只说每周但没有星期、七点等不明确早晚、多个不同时间、没有明确创建意图时，clarify给出追问，禁止猜测。'
-        'item是用户原话中的连续短语，最多20字，例如喝水；没有事项必须clarify追问，禁止从旧对话猜测。'
-        'text是到点直接朗读的温暖提醒，最多40字，不写括号舞台说明。'
-        'seconds为相对时长总秒数，未指定填0；clarify无需追问时为空。')
-    instruction += ('程序已核验的倒计时为' + str(int(seconds)) + '秒。' if relative else
-        f'程序已核验钟点{draft["minute"] // 60:02}:{draft["minute"] % 60:02}、星期位图{draft["weekdays"] or 0}、'
-        f'日期{draft["date"] or now.date().isoformat()}。')
-    instruction += '已核验字段不需要再次追问；仅事项缺失时用clarify询问。'
+    instruction = (wording('reminder_tools.prompt.answer.042', p0=(now.isoformat())))
+    instruction += (wording('reminder_tools.prompt.answer.043') + str(int(seconds)) + wording('reminder_tools.prompt.answer.044') if relative else
+        wording('reminder_tools.prompt.answer.045', p0=(draft['minute'] // 60), p1=(draft['minute'] % 60), p2=(draft['weekdays'] or 0), p3=(draft['date'] or now.date().isoformat())))
+    instruction += wording('reminder_tools.prompt.answer.046')
     properties = {'kind': {'type': 'string', 'enum': ['countdown', 'scheduled']},
         'seconds': {'type': 'integer'}, 'date': {'type': 'string'}, 'time': {'type': 'string'},
         'weekdays': {'type': 'array', 'items': {'type': 'integer', 'minimum': 1, 'maximum': 7}, 'maxItems': 7},
@@ -472,32 +464,32 @@ async def answer(provider, messages, execute, prepare, view):
     planning.append({'role': 'user', 'content': source})
     planned_at = time.monotonic()
     try:
-        values = ({'item': '倒计时', 'text': '时间到啦。', 'clarify': ''} if default_timer else
+        values = ({'item': '倒计时', 'text': wording('reminder_tools.reply.answer.047'), 'clarify': ''} if default_timer else
                   await old.plan(provider, planning, instruction, properties, list(properties), max_tokens=512))
     except old.PlanValidationError:
         LOG.info('REMINDER CLARIFY: reason=invalid_model_plan; no write')
         draft['need'] = 'item'
-        return '没有确认清楚提醒事项，请再说一次具体要做什么。'
+        return wording('reminder_tools.reply.answer.048')
     LOG.info('REMINDER PLAN: elapsed_ms=%s', round((time.monotonic() - planned_at) * 1000))
     if isinstance(values.get('clarify'), str) and values['clarify']:
         draft['need'] = 'item'
         view['draft'] = draft
-        return '请补充要提醒你做什么，例如提醒我喝水。'
+        return wording('reminder_tools.reply.answer.041')
     if any(not isinstance(values.get(key), str) for key in ('item', 'text')):
         draft['need'] = 'item'
-        return '请再说清楚要提醒你做什么。'
+        return wording('reminder_tools.reply.answer.049')
     item, text = (clean_spoken_text(values.get(key, '')) for key in ('item', 'text'))
     if not item:
         draft['need'] = 'item'
         view['draft'] = draft
-        return '请补充要提醒你做什么，例如提醒我喝水。'
+        return wording('reminder_tools.reply.answer.041')
     if not 1 <= len(item.encode()) <= 60 or not 1 <= len(text.encode()) <= 120:
         draft['need'] = 'item'
-        return '请简短说出提醒事项，例如喝水或吃饭。'
+        return wording('reminder_tools.reply.answer.050')
     if item not in source and not default_timer:
         draft['need'] = 'item'
         view['draft'] = draft
-        return '请再说清楚要提醒你做什么。'
+        return wording('reminder_tools.reply.answer.049')
     identity = secrets.token_hex(8)
     args = {'cache_id': identity, 'item': item, 'text': text}
     if relative:
@@ -517,14 +509,14 @@ async def answer(provider, messages, execute, prepare, view):
                 selected = datetime.strptime(draft['date'], '%Y-%m-%d').date() if draft['date'] else now.date()
                 deadline = int(datetime(selected.year, selected.month, selected.day, hour, minute % 60, tzinfo=TZ).timestamp())
             except (ValueError, OverflowError):
-                return '请告诉我有效的提醒日期。'
+                return wording('reminder_tools.reply.answer.037')
             if deadline < status['now'] + 60:
-                return '这个时间已经过去或距离现在不足一分钟，请重新指定日期和时间。'
+                return wording('reminder_tools.reply.answer.051')
         if not deadline < MAX_TIME:
-            return '请设置二一〇〇年之前的提醒。'
+            return wording('reminder_tools.reply.answer.052')
         args.update(deadline=deadline, weekdays=mask, minute=minute)
         if any(conflict(args, row) for row in status['records'] if row['kind'] == 'scheduled'):
-            return '定时提醒之间至少需要间隔五分钟，请换一个时间。'
+            return wording('reminder_tools.reply.answer.053')
         name = START
     view.pop('draft', None)
     prepared_at = time.monotonic()
@@ -535,8 +527,8 @@ async def answer(provider, messages, execute, prepare, view):
     LOG.info('REMINDER RECEIPT: elapsed_ms=%s', round((time.monotonic() - receipt_at) * 1000))
     validate_status(result)
     if not result['ok']:
-        return {1: '提醒名额已满，请先取消旧提醒。', 2: '定时提醒之间至少需要间隔五分钟。',
-                3: '提醒时间或音频尚未准备好，请重新设置。'}.get(result['error'], '提醒保存失败，请重新设置。')
+        return wording({1: 'reminders.reply.quota', 2: 'reminders.reply.spacing',
+                        3: 'reminders.reply.not_ready'}.get(result['error'], 'reminders.reply.save_failed'))
     stored = next((row for row in result['records'] if row['id'] == identity), None)
     if not stored or stored['item'] != item or stored['text'] != text:
         raise ValueError('Reminder creation not confirmed')
@@ -546,5 +538,5 @@ async def answer(provider, messages, execute, prepare, view):
     elif any(stored[key] != args[key] for key in ('deadline', 'minute', 'weekdays')):
         raise ValueError('Scheduled rule mismatch')
     if default_timer:
-        return f'好呀，已设置{old.spoken_duration(seconds)}倒计时，到时提醒你。'
-    return f'好呀，{rule_words(stored)}{time_words(stored["deadline"], result["now"])}提醒你{item}。'
+        return wording('reminder_tools.reply.answer.054', p0=(old.spoken_duration(seconds)))
+    return wording('reminder_tools.reply.answer.055', p0=(rule_words(stored)), p1=(time_words(stored['deadline'], result['now'])), p2=(item))
