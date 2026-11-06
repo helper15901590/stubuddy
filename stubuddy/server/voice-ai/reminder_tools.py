@@ -1,4 +1,5 @@
 """Bounded reminder tools. The device owns plans, deadlines and final validation."""
+from tool_execution import create_reminder
 from prompt_store import wording
 from datetime import datetime, timedelta, timezone
 import re
@@ -519,24 +520,11 @@ async def answer(provider, messages, execute, prepare, view):
             return wording('reminder_tools.reply.answer.053')
         name = START
     view.pop('draft', None)
-    prepared_at = time.monotonic()
-    await prepare(text, identity)
-    LOG.info('REMINDER PREPARE: elapsed_ms=%s', round((time.monotonic() - prepared_at) * 1000))
-    receipt_at = time.monotonic()
-    result = await execute(name, args)
-    LOG.info('REMINDER RECEIPT: elapsed_ms=%s', round((time.monotonic() - receipt_at) * 1000))
-    validate_status(result)
+    result = await create_reminder(name, args, prepare, execute)
     if not result['ok']:
         return wording({1: 'reminders.reply.quota', 2: 'reminders.reply.spacing',
                         3: 'reminders.reply.not_ready'}.get(result['error'], 'reminders.reply.save_failed'))
-    stored = next((row for row in result['records'] if row['id'] == identity), None)
-    if not stored or stored['item'] != item or stored['text'] != text:
-        raise ValueError('Reminder creation not confirmed')
-    if name == TIMER:
-        if not result['now'] + seconds - 5 <= stored['deadline'] <= result['now'] + seconds:
-            raise ValueError('Countdown deadline mismatch')
-    elif any(stored[key] != args[key] for key in ('deadline', 'minute', 'weekdays')):
-        raise ValueError('Scheduled rule mismatch')
+    stored = next(row for row in result['records'] if row['id'] == identity)
     if default_timer:
         return wording('reminder_tools.reply.answer.054', p0=(old.spoken_duration(seconds)))
     return wording('reminder_tools.reply.answer.055', p0=(rule_words(stored)), p1=(time_words(stored['deadline'], result['now'])), p2=(item))

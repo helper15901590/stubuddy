@@ -1,4 +1,5 @@
 """One device-owned countdown; prepared voice and acknowledged tools only."""
+from tool_execution import create_reminder
 from prompt_store import wording
 import base64
 import json
@@ -184,11 +185,7 @@ async def answer(provider, messages, execute, prepare):
     if not isinstance(text, str) or not 1 <= len(text) <= 40 or len(text.encode('utf-8')) > 120:
         raise ValueError("Invalid reminder wording")
     identity = secrets.token_hex(8)
-    await prepare(text, identity)
-    result = await execute(START, {"seconds": seconds, "text": text, "cache_id": identity})
-    validate_status(result)
-    if not result['active'] or result['remaining'] > seconds or result['remaining'] < seconds - 5:
-        raise ValueError("Countdown start not confirmed")
+    await create_reminder(START, {"seconds": seconds, "text": text, "cache_id": identity}, prepare, execute)
     return wording('countdown_tools.reply.answer.011', p0=(spoken_duration(seconds)))
 
 

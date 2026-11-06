@@ -30,6 +30,8 @@ import capabilities
 import clock_answers
 import countdown_tools
 import reminder_tools
+from tool_execution import execute_tool
+from tool_registry import ToolError
 
 LOG = logging.getLogger("stubuddy.ai")
 PATH = "/stubuddy/ai"
@@ -134,9 +136,17 @@ class VoiceService:
                         lambda message: send(message, turn))
 
         async def device_tool(turn, name, values):
+            available = {key for key, enabled in (
+                ('device_controls', device_controls), ('volume_restore', volume_restore),
+                ('countdown', countdown), ('scheduled', scheduled)) if enabled}
+            return await execute_tool(name, values,
+                lambda tool, arguments: device_transport(turn, tool, arguments),
+                available, session, turn)
+
+        async def device_transport(turn, name, values):
             nonlocal tool_waiter
             if not device_controls or active_turn != turn or tool_waiter is not None:
-                raise ValueError("Device tool unavailable")
+                raise ToolError("device_unavailable")
             call_id = secrets.token_hex(8)
             future = asyncio.get_running_loop().create_future()
             tool_waiter = (turn, call_id, future)
@@ -144,12 +154,6 @@ class VoiceService:
                 await send({"type": "stage", "state": "tools"}, turn)
                 await send({"type": "device_tool", "call_id": call_id, "name": name, **values}, turn)
                 result = await asyncio.wait_for(future, 5)
-                if name.startswith('self.reminders.'):
-                    reminder_tools.validate_status(result)
-                elif name.startswith('self.countdown.'):
-                    countdown_tools.validate_status(result)
-                else:
-                    result_volume(result)
                 LOG.info("TOOL CONFIRMED session=%s turn=%s name=%s", session, turn, name)
                 return result
             finally:
@@ -289,7 +293,7 @@ class VoiceService:
                 pass
             except Exception as error:
                 # Exception text can contain upstream secrets; log only its class.
-                diagnostic = error.code if isinstance(error, ProviderFailure) else type(error).__name__
+                diagnostic = error.code if isinstance(error, (ProviderFailure, ToolError)) else type(error).__name__
                 LOG.warning("TURN FAILED session=%s turn=%s stage=%s kind=%s", session, turn, stage, diagnostic)
                 await send({"type": "turn_error", "code": stage}, turn)
             finally:

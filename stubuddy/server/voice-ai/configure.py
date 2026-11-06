@@ -11,7 +11,7 @@ import tarfile
 
 ROOT = Path(__file__).resolve().parent
 FIRMWARE = ROOT.parents[2] / "xiaozhi-esp32-main/xiaozhi-esp32-main"
-FILES = ("prompt_admin.py", "prompt_store.py", "prompts/defaults.json", "voice_server.py", "history.py", "audio.py", "providers.py", "device_tools.py", "capabilities.py", "clock_answers.py", "calendar_input.py", "countdown_tools.py", "reminder_tools.py", "reminder_smoke.py", "requirements.txt", "install_ecs.py", "smoke_test.py", "countdown_smoke.py")
+FILES = ("tool_registry.py", "tool_execution.py", "prompt_admin.py", "prompt_store.py", "prompts/defaults.json", "voice_server.py", "history.py", "audio.py", "providers.py", "device_tools.py", "capabilities.py", "clock_answers.py", "calendar_input.py", "countdown_tools.py", "reminder_tools.py", "reminder_smoke.py", "requirements.txt", "install_ecs.py", "smoke_test.py", "countdown_smoke.py")
 
 
 def configure(address, *, set_key=False, region=None, workspace_id=None, tts_mode=None,

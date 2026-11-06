@@ -831,5 +831,40 @@
     "max_chars": 180,
     "kind": "reply",
     "source": "reminder_tools.py"
+  },
+  "tools.description.reminders.get": {
+    "text": "查询本设备提醒列表、提醒音量和设备时间。",
+    "fields": [],
+    "max_chars": 1000,
+    "source": "tool_registry.py",
+    "kind": "prompt"
+  },
+  "tools.description.reminders.countdown": {
+    "text": "创建一个一分钟至二十四小时的倒计时；必须先准备提醒音频并核对设备回执。",
+    "fields": [],
+    "max_chars": 1000,
+    "source": "tool_registry.py",
+    "kind": "prompt"
+  },
+  "tools.description.reminders.start": {
+    "text": "创建一次性或指定星期的定时提醒；必须先准备音频，遵守数量和间隔限制。",
+    "fields": [],
+    "max_chars": 1000,
+    "source": "tool_registry.py",
+    "kind": "prompt"
+  },
+  "tools.description.reminders.cancel": {
+    "text": "使用查询得到的提醒标识取消指定提醒，不能猜测标识。",
+    "fields": [],
+    "max_chars": 1000,
+    "source": "tool_registry.py",
+    "kind": "prompt"
+  },
+  "tools.description.reminders.volume": {
+    "text": "设置本设备提醒音量，范围零到一百，独立于对话音量。",
+    "fields": [],
+    "max_chars": 1000,
+    "source": "tool_registry.py",
+    "kind": "prompt"
   }
 }

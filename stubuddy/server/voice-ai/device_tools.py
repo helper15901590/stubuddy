@@ -2,6 +2,7 @@
 from prompt_store import wording
 import json
 import re
+from tool_registry import input_schema, validate
 
 GET = "self.get_device_status"
 SET = "self.audio_speaker.set_volume"
@@ -11,16 +12,12 @@ MODEL_SET = "self_audio_speaker_set_volume"
 MODEL_RESTORE = "self_audio_speaker_restore_volume"
 MODEL_NAMES = {MODEL_GET: GET, MODEL_SET: SET, MODEL_RESTORE: RESTORE}
 TOOLS = [
-    {"type": "function", "function": {"name": MODEL_GET,
-        "description": wording('device_tools.prompt.global.001'),
-        "parameters": {"type": "object", "properties": {}, "additionalProperties": False}}},
-    {"type": "function", "function": {"name": MODEL_SET,
-        "description": wording('device_tools.prompt.global.002'),
-        "parameters": {"type": "object", "properties": {"volume": {"type": "integer", "minimum": 0, "maximum": 100}},
-                       "required": ["volume"], "additionalProperties": False}}},
-    {"type": "function", "function": {"name": MODEL_RESTORE,
-        "description": wording('device_tools.prompt.global.003'),
-        "parameters": {"type": "object", "properties": {}, "additionalProperties": False}}}
+    {'type': 'function', 'function': {
+        'name': model, 'description': wording(description), 'parameters': input_schema(name)}}
+    for model, name, description in (
+        (MODEL_GET, GET, 'device_tools.prompt.global.001'),
+        (MODEL_SET, SET, 'device_tools.prompt.global.002'),
+        (MODEL_RESTORE, RESTORE, 'device_tools.prompt.global.003'))
 ]
 INSTRUCTION = (wording('device_tools.prompt.global.004'))
 
@@ -79,10 +76,7 @@ def arguments(name, raw):
     if name not in (GET, SET, RESTORE) or not isinstance(raw, str) or len(raw) > 256:
         raise ValueError("Invalid tool call")
     value = json.loads(raw)
-    if type(value) is not dict or set(value) != ({"volume"} if name == SET else set()):
-        raise ValueError("Invalid tool arguments")
-    if name == SET and (type(value["volume"]) is not int or not 0 <= value["volume"] <= 100):
-        raise ValueError("Invalid volume")
+    validate(name, value)
     return value
 
 
