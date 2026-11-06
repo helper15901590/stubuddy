@@ -1,3 +1,9 @@
+本轮发送队列与提醒关怀修复：见 [UPLINK-CARE-VALIDATION.md](UPLINK-CARE-VALIDATION.md)。软件检查通过；2026-11-06 用户确认编译、烧录和真机验收通过，发送队列满未再出现，提醒关怀正常。
+
+2026-11-06 当前固件修复检查点：普通开机/断线按已保存网络顺序回退，配网页增加“×”删除对应保存信息，主工程统一数字峰值改为 80%（约 ±26214）。37 项本地软件检查通过；ESP-IDF 编译、烧录和真机验收由用户执行并确认通过，本记录随源码一并提交。完整命令与验收见 [本轮手册](WIFI-FALLBACK-VOLUME-VALIDATION.md)。下方 70% 和“待提交/待验收”等属于此前阶段记录。
+
+4.3.2 变体 `stubuddy-s3-n16r8-ai-ptt-reminders` 已在 `ebb7c28` 完成验收提交；提示词管理和工具执行层分别已在 `0e32b16`、`86dca89` 完成。当前继续沿用该固件变体。
+
 新增4.3.2变体：`stubuddy-s3-n16r8-ai-ptt-reminders`（`CONFIG_STUBUDDY_SCHEDULED`）。一个倒计时和三个一次性/按周定时提醒、统一事项查询、三分钟循环，沿用独立提醒音量、PTT及八轮历史。旧变体保留。本轮待真机验收；详见工作区`stubuddy/server/voice-ai/REMINDERS.md`。
 
 # stubuddy S3 N16R8：检查点3.1

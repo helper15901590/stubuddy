@@ -17,6 +17,7 @@ button,input{font:inherit}button{cursor:pointer}button:disabled{opacity:.45;curs
 .network-row{border-bottom:1px solid #eee}.network-button{display:flex;align-items:center;justify-content:space-between;gap:14px;width:100%;min-height:54px;padding:14px 0;border:0;background:#fff;color:#222;text-align:left}
 .network-button[aria-expanded=true]{font-weight:650}.network-button[aria-pressed=true]{background:#ededed;box-shadow:inset 3px 0 #333;border-radius:7px;padding-left:12px;padding-right:12px;font-weight:650}
 .saved-section .network-button:not([aria-pressed=true]){background:transparent}.network-name{font-size:15px;min-width:0;overflow-wrap:anywhere;flex:1}.selection-mark{font-size:15px;color:#333}.empty{padding:16px 0;color:#888;font-size:13px}
+.saved-section .network-row{display:flex;align-items:center;gap:8px}.saved-section .network-button{flex:1;min-width:0;width:auto}.forget-button{flex:none;width:40px;height:44px;border:0;border-radius:7px;background:transparent;color:#777;font-size:24px;line-height:1}.forget-button:hover{background:#eee;color:#b3261e}
 .manual{margin-top:18px;padding:10px 0;color:#555;font-size:13px;border:0;background:#fff;text-decoration:underline;text-underline-offset:4px}
 .editor{padding:16px;background:#f8f8f8;border-radius:8px;margin:0 0 14px}.editor-head{display:flex;align-items:center;justify-content:space-between;gap:12px}h3{font-size:14px;line-height:1.5;margin:0;overflow-wrap:anywhere}
 label{display:block;font-size:13px;margin:15px 0 7px}input[type=text],input[type=password]{width:100%;background:#fff;border:1px solid #ddd;border-radius:7px;padding:12px;font-size:16px;color:#222}
@@ -63,6 +64,7 @@ const el = id => document.getElementById(id);
 let submitting = false, connected = false, blocked = false, polling = false, scanning = false;
 let lastNetworks = '', lastSaved = '', savedNetworks = [], lastPhase = '', localError = '', pollTimer;
 let selectedSsid = '', editorKind = 'manual';
+let forgettingSsid = null, forgetOperation = 0, historyMessage = '';
 const showStatus = (text, kind = '') => {
   for (const id of ['status', 'editor-status']) { el(id).textContent = text; el(id).className = 'status ' + kind; el(id).hidden = !text; }
 };
@@ -72,7 +74,7 @@ const showProgress = text => {
   el('progress-text').textContent = text;
 };
 const bytes = text => new TextEncoder().encode(text).length;
-const busy = () => submitting || connected || blocked;
+const busy = () => submitting || connected || blocked || forgettingSsid !== null;
 async function request(path, options = {}) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 5000);
@@ -111,13 +113,20 @@ function addNetwork(id, ssid, action) {
   const mark = document.createElement('span'); mark.className = 'selection-mark'; mark.textContent = '✓'; mark.hidden = true; mark.setAttribute('aria-hidden', 'true');
   button.append(name); button.append(mark);
   button.addEventListener('click', event => { if (event.isTrusted) return action(); });
-  row.append(button); el(id).append(row);
+  row.append(button);
+  if (id === 'saved') {
+    const forget = document.createElement('button'); forget.type = 'button'; forget.className = 'forget-button';
+    forget.textContent = '×'; forget.setAttribute('aria-label', '删除已保存网络 ' + ssid);
+    forget.addEventListener('click', event => { if (event.isTrusted) return forgetSaved(ssid); });
+    row.append(forget);
+  }
+  el(id).append(row);
 }
-function renderSaved(networks) {
+function renderSaved(networks, force = false) {
   savedNetworks = networks;
   const signature = JSON.stringify(networks);
   if (signature === lastSaved) return;
-  if (el('saved').contains(document.activeElement)) return;
+  if (!force && el('saved').contains(document.activeElement)) return;
   lastSaved = signature; resetList('saved');
   if (!networks.length) addEmpty('saved', '暂无记录');
   for (const ssid of networks) addNetwork('saved', ssid, () => useSaved(ssid));
@@ -136,11 +145,12 @@ function renderNetworks(networks, isScanning = false) {
 function lockControls(locked) {
   for (const id of ['submit', 'scan', 'manual', 'close-editor', 'ssid', 'open', 'show']) el(id).disabled = locked;
   el('password').disabled = locked || el('open').checked;
-  for (const id of ['saved', 'networks']) for (const row of rows(id)) row.children[0].disabled = locked;
+  for (const id of ['saved', 'networks']) for (const row of rows(id))
+    for (const child of row.children) if (child.tagName === 'BUTTON') child.disabled = locked;
 }
 function selectNetwork(ssid, secured, kind) {
   if (busy()) return;
-  localError = ''; selectedSsid = ssid; editorKind = kind;
+  localError = ''; historyMessage = ''; selectedSsid = ssid; editorKind = kind;
   el('ssid').value = ssid; el('password').value = '';
   el('show').checked = false; el('password').type = 'password'; el('open').checked = !secured;
   el('ssid-field').hidden = kind !== 'manual';
@@ -159,8 +169,33 @@ async function useSaved(ssid) {
   el('editor').hidden = true; placeEditor();
   await startConnection('/api/reconnect', {ssid});
 }
+async function forgetSaved(ssid) {
+  if (busy()) return;
+  localError = ''; historyMessage = ''; forgettingSsid = ssid; forgetOperation = 0;
+  submitting = true; lockControls(true); showStatus('正在删除已保存网络…');
+  showProgress('正在删除已保存网络…');
+  try {
+    const result = await request('/api/forget', {method:'POST', headers:{'Content-Type':'application/json',
+      'X-Setup-Action':'history-forget'}, body:JSON.stringify({ssid})});
+    if (!Number.isInteger(result.operation) || result.operation <= 0) throw new Error('删除结果不确定，请刷新列表确认。');
+    forgetOperation = result.operation;
+  } catch (error) {
+    forgettingSsid = null;
+    localError = error.name === 'AbortError' ? '删除请求超时，请刷新列表确认是否已删除。' : error.message;
+    showStatus(localError, 'error'); showProgress('');
+  } finally { submitting = false; await poll(); }
+}
 function applyStatus(status) {
-  renderSaved(status.saved_networks || []);
+  const forgetFinished = forgettingSsid !== null && forgetOperation !== 0 && status.history_operation === forgetOperation;
+  if (forgetFinished) {
+    const removed = status.history_ok === true && !(status.saved_networks || []).includes(forgettingSsid);
+    if (removed) {
+      historyMessage = '已删除该网络，重新连接时需要输入密码。';
+      if (editorKind === 'saved' && selectedSsid === forgettingSsid) selectedSsid = '';
+    } else localError = '删除未能完成，请查看列表后重试。';
+    forgettingSsid = null; forgetOperation = 0;
+  }
+  renderSaved(status.saved_networks || [], forgetFinished);
   renderNetworks(status.networks || [], status.scanning);
   placeEditor();
   connected = status.phase === 'connected';
@@ -173,10 +208,12 @@ function applyStatus(status) {
     localError = ''; showStatus(status.message, 'done');
     el('password').value = '';
     el('editor').hidden = true; placeEditor();
+  } else if (forgettingSsid !== null) {
+    showStatus('正在删除已保存网络…'); showProgress('正在删除已保存网络…');
   } else if (!submitting) {
     if (status.phase === 'connecting') localError = '';
     const failed = status.failed || status.phase === 'error' || (lastPhase === 'connecting' && status.phase === 'setup');
-    showStatus(localError || (failed || status.phase === 'connecting' ? status.message : ''), localError || failed ? 'error' : '');
+    showStatus(localError || (failed ? status.message : historyMessage || (status.phase === 'connecting' ? status.message : '')), localError || failed ? 'error' : '');
     showProgress(failed || localError ? '' : status.phase === 'connecting' || status.busy
       ? '正在连接 Wi-Fi，请稍候…' : status.scanning || scanning ? '正在查找附近的 Wi-Fi…' : '');
   }
@@ -206,7 +243,7 @@ for (const id of ['ssid', 'password']) {
   const field = el(id);
   // Initially the whole editor is hidden. Once selected, ordinary editable
   // inputs let the browser handle trusted taps and keyboard focus natively.
-  field.addEventListener('input', () => { localError = ''; });
+  field.addEventListener('input', () => { localError = ''; historyMessage = ''; });
 }
 window.addEventListener('pageshow', () => {
   for (const id of ['ssid', 'password']) el(id).blur();
@@ -218,7 +255,7 @@ el('open').addEventListener('change', () => { localError = ''; el('password').di
 el('scan').addEventListener('click', scan);
 async function startConnection(path, body) {
   if (busy()) return;
-  localError = ''; submitting = true; lockControls(true);
+  localError = ''; historyMessage = ''; submitting = true; lockControls(true);
   el('ssid').blur(); el('password').blur(); showStatus('正在连接，请稍候…');
   showProgress('正在提交连接请求…');
   try {

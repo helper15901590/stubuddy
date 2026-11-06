@@ -2,6 +2,7 @@
 
 #include "clock_age.h"
 #include "echo_protocol.h"
+#include "uplink_budget.h"
 #include "wifi_setup.h"
 #ifdef CONFIG_STUBUDDY_AI_CONTROLS
 #include "device_controls.h"
@@ -66,7 +67,7 @@ private:
     enum class Kind { Start, Audio, Stop, Abort, Played, ToolResult, TimerSync };
     struct Command {
         Kind kind = Kind::Start;
-        unsigned turn = 0, epoch = 0;
+        unsigned turn = 0, epoch = 0, queued_at = 0;
         echo::Metadata metadata;
         size_t size = 0;
         uint8_t payload[kOpusMaxPacketBytes] = {};
@@ -75,13 +76,15 @@ private:
         std::array<char, 17> session{};
 #endif
     };
-    static constexpr unsigned kQueueDepth = 8;
+    static constexpr unsigned kQueueDepth = UplinkBudget::kDepth;
     static void WorkerEntry(void* context);
     static void Event(void* context, esp_event_base_t base, int32_t id, void* data);
     void Worker();
     void OnMessage(unsigned opcode, const uint8_t* data, size_t size);
     void Fault(const char* reason = "transport_or_protocol");
-    bool Enqueue(const Command& command);
+    bool Enqueue(Command& command);
+    UplinkBudget uplink_budget_;
+    std::atomic<unsigned> queue_high_water_{0};
     bool SendText(const char* text);
     bool ReadMetadata(const cJSON* root, echo::Metadata& metadata);
     WifiSetup* wifi_ = nullptr;

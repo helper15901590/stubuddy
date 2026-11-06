@@ -55,7 +55,7 @@ namespace echo_settings = echo_local;
 namespace {
 constexpr char kTag[] = "STUBUDDY_WS";
 #ifdef CONFIG_STUBUDDY_AI_CONTROLS
-constexpr unsigned kSendTimeoutMs = 2000;
+constexpr unsigned kSendTimeoutMs = UplinkBudget::kSendTimeoutMs;
 #else
 constexpr unsigned kSendTimeoutMs = 500;
 #endif
@@ -169,11 +169,29 @@ void WsEcho::Timeout(const char* reason, unsigned elapsed_ms, unsigned limit_ms)
     Fault(reason);
 }
 
-bool WsEcho::Enqueue(const Command& command) {
-    if (xQueueSend(outgoing_, &command, 0) == pdTRUE)
+bool WsEcho::Enqueue(Command& command) {
+    const bool audio = command.kind == Kind::Audio;
+    const bool admitted = !audio || uplink_budget_.AcquireAudio();
+    command.queued_at = Now();
+    if (admitted && xQueueSend(outgoing_, &command, 0) == pdTRUE) {
+        const unsigned depth = uxQueueMessagesWaiting(outgoing_);
+        unsigned high = queue_high_water_.load();
+        while (depth > high && !queue_high_water_.compare_exchange_weak(high, depth)) {
+        }
+        if (command.kind == Kind::Stop)
+            ESP_LOGI(kTag, "UPLINK QUEUED: turn=%u frames=%u pending=%u high_water=%u capacity=%u",
+                     command.turn, command.metadata.frames, depth, queue_high_water_.load(),
+                     kQueueDepth);
         return true;
-    ESP_LOGW(kTag, "SEND QUEUE FULL: round failed; capture may finish; no silent frame drop");
-    Fault();
+    }
+    if (audio && admitted)
+        uplink_budget_.ReleaseAudio();
+    ESP_LOGW(kTag,
+             "SEND QUEUE FULL: kind=%u turn=%u seq=%u pending=%u high_water=%u capacity=%u; no "
+             "silent frame drop",
+             unsigned(command.kind), command.turn, command.metadata.frames,
+             unsigned(uxQueueMessagesWaiting(outgoing_)), queue_high_water_.load(), kQueueDepth);
+    Fault("uplink_queue_exhausted");
     return false;
 }
 
@@ -267,7 +285,7 @@ void WsEcho::Cancel() {
     done_.store(false);
     received_->Reset();
     xSemaphoreGive(rx_mutex_);
-    if (old && connected_.load()) {
+    if (old && ready()) {
         Command command;
         command.kind = Kind::Abort;
         command.turn = old;
@@ -840,8 +858,14 @@ void WsEcho::Event(void* context, esp_event_base_t, int32_t id, void* raw) {
 
 bool WsEcho::SendText(const char* text) {
     const size_t size = std::strlen(text);
+    const unsigned started = Now();
     const int sent =
         esp_websocket_client_send_text(client_, text, size, pdMS_TO_TICKS(kSendTimeoutMs));
+    const unsigned elapsed = Now() - started;
+    if (elapsed >= 100)
+        ESP_LOGW(kTag, "WS SEND SLOW: text turn=%u elapsed_ms=%u pending=%u high_water=%u",
+                 active_turn_.load(), elapsed, unsigned(uxQueueMessagesWaiting(outgoing_)),
+                 queue_high_water_.load());
     if (sent == int(size))
         return true;
     ESP_LOGW(kTag,
@@ -936,10 +960,17 @@ void WsEcho::Worker() {
         }
         if (xQueueReceive(outgoing_, &sending_, pdMS_TO_TICKS(20)) != pdTRUE)
             continue;
+        if (sending_.kind == Kind::Audio)
+            uplink_budget_.ReleaseAudio();
         if (!ready() || sending_.epoch != epoch() ||
             (sending_.kind != Kind::Abort && sending_.kind != Kind::Played &&
              sending_.kind != Kind::TimerSync && sending_.turn != active_turn_.load()))
             continue;
+        const unsigned waited = Now() - sending_.queued_at;
+        if (waited >= 500)
+            ESP_LOGW(kTag, "UPLINK BACKLOG: kind=%u turn=%u seq=%u wait_ms=%u pending=%u",
+                     unsigned(sending_.kind), sending_.turn, sending_.metadata.frames, waited,
+                     unsigned(uxQueueMessagesWaiting(outgoing_)));
         char text[384];
         if (sending_.kind == Kind::TimerSync) {
             SendText(reinterpret_cast<const char*>(sending_.payload));
@@ -947,10 +978,18 @@ void WsEcho::Worker() {
             const size_t size =
                 echo::PackAudio(wire_.data(), wire_.size(), sending_.turn, sending_.metadata.frames,
                                 sending_.payload, sending_.size);
+            const unsigned started = Now();
             const int sent = size ? esp_websocket_client_send_bin(
                                         client_, reinterpret_cast<const char*>(wire_.data()), size,
                                         pdMS_TO_TICKS(kSendTimeoutMs))
                                   : -1;
+            const unsigned elapsed = Now() - started;
+            if (elapsed >= 100)
+                ESP_LOGW(
+                    kTag,
+                    "WS SEND SLOW: audio turn=%u seq=%u elapsed_ms=%u pending=%u high_water=%u",
+                    sending_.turn, sending_.metadata.frames, elapsed,
+                    unsigned(uxQueueMessagesWaiting(outgoing_)), queue_high_water_.load());
             if (!size || sent != int(size)) {
                 ESP_LOGW(kTag,
                          "WS SEND FAILED: audio turn=%u seq=%u requested=%u sent=%d timeout_ms=%u; "

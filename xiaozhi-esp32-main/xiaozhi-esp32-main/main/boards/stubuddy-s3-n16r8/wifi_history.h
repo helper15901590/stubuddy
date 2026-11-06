@@ -66,6 +66,36 @@ struct WifiHistory {
         items[0] = successful;
         return true;
     }
+    constexpr bool Forget(const char* ssid) {
+        const int found = Find(ssid);
+        if (found < 0)
+            return false;
+        for (unsigned i = static_cast<unsigned>(found); i + 1 < count; ++i)
+            items[i] = items[i + 1];
+        items[--count] = {};  // Remove the password from the unused persisted slot too.
+        return true;
+    }
+};
+
+// One bounded pass through the saved order. A successful connection promotes
+// its entry only after the pass ends; failed attempts never reorder history.
+class WifiSavedAttempts {
+public:
+    constexpr void Start(unsigned count) {
+        count_ = count <= WifiHistory::kCapacity ? count : WifiHistory::kCapacity;
+        next_ = 0;
+    }
+    constexpr bool pending() const { return next_ < count_; }
+    constexpr unsigned count() const { return count_; }
+    constexpr bool Take(unsigned& index) {
+        if (!pending())
+            return false;
+        index = next_++;
+        return true;
+    }
+
+private:
+    unsigned count_ = 0, next_ = 0;
 };
 
 }  // namespace stubuddy

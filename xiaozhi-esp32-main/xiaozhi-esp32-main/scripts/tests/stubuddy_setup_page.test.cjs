@@ -54,6 +54,10 @@ async function page(options = {}) {
         snapshot.phase = 'connecting'; snapshot.busy = true; snapshot.message = '正在连接';
         return {ok:true, json:async () => ({accepted:true})};
       }
+      if (url === '/api/forget') {
+        if (options.reject) return {ok:false, json:async () => ({error:options.reject})};
+        return {ok:true, json:async () => ({accepted:true, operation:7})};
+      }
       return {ok:true, json:async () => structuredClone(snapshot)};
     },
   };
@@ -66,6 +70,7 @@ async function page(options = {}) {
     submit:() => get('submit').listeners.click({isTrusted:true}),
     manual:() => get('manual').listeners.click(),
     choose:(id, index = 0) => networkRows(id)[index].children[0].listeners.click({isTrusted:true}),
+    forget:(index = 0) => networkRows('saved')[index].children[1].listeners.click({isTrusted:true}),
     tap:id => { if (!get(id).disabled && !get(id).readOnly) get(id).focus(); }};
 }
 
@@ -286,6 +291,81 @@ test('selection is visible on one row and survives a status refresh', async () =
 test('the single embedded page stays under 24KiB and has no external assets', () => {
   assert.ok(Buffer.byteLength(html) < 24 * 1024);
   assert.doesNotMatch(html, /<(?:script|link|img)\b[^>]*(?:src|href)=/i);
+});
+
+test('each saved network has an accessible delete button; nearby networks do not', async () => {
+  const ssid = '<img src=x onerror=alert(1)>';
+  const p = await page({snapshot:{saved_networks:[ssid], networks:[{ssid, secured:true}]}});
+  const row = p.networkRows('saved')[0];
+  assert.equal(row.children.length, 2);
+  assert.equal(row.children[1].textContent, '×');
+  assert.equal(row.children[1].attributes['aria-label'], '删除已保存网络 ' + ssid);
+  assert.equal(p.networkRows('networks')[0].children.length, 1);
+});
+
+test('delete posts only the selected SSID and waits for a matching device result', async () => {
+  const p = await page({snapshot:{saved_networks:['office', 'home']}});
+  const button = p.networkRows('saved')[0].children[1];
+  button.focus();
+  await p.forget();
+  const post = p.calls.find(x => x.url === '/api/forget');
+  assert.deepEqual(JSON.parse(post.body), {ssid:'office'});
+  assert.equal(post.headers['X-Setup-Action'], 'history-forget');
+  assert.equal(post.headers['X-Setup-Token'], 'a'.repeat(32));
+  assert.equal(p.networkRows('saved').length, 2);
+  assert.equal(p.networkRows('saved')[1].children[1].disabled, true);
+  assert.equal(p.get('editor').hidden, true);
+  await p.forget(1); await p.choose('saved', 1);
+  assert.equal(p.calls.filter(x => x.method === 'POST').length, 1);
+  // An earlier completed operation must not unlock or remove the selected row.
+  p.snapshot.history_operation = 6; p.snapshot.history_ok = true;
+  await p.poll(); assert.equal(p.networkRows('saved').length, 2);
+  assert.match(p.get('progress-text').textContent, /删除/);
+  // NVS completion updates the list even while the old delete button has focus.
+  p.snapshot.history_operation = 7; p.snapshot.history_ok = true;
+  p.snapshot.saved_networks = ['home']; await p.poll();
+  assert.equal(p.networkRows('saved').length, 1);
+  assert.equal(p.networkRows('saved')[0].dataset.ssid, 'home');
+  assert.equal(p.networkRows('saved')[0].children[1].disabled, false);
+  assert.match(p.get('status').textContent, /已删除/);
+  assert.equal(p.get('progress').hidden, true);
+  assert.equal(p.calls.some(x => x.url === '/api/reconnect'), false);
+  p.snapshot.failed = true; p.snapshot.message = '扫描失败，可以重试'; await p.poll();
+  assert.match(p.get('status').textContent, /扫描失败/);
+  assert.doesNotMatch(p.get('status').textContent, /已删除/);
+});
+
+test('failed persistence preserves the visible record and permits a deliberate retry', async () => {
+  const p = await page({snapshot:{saved_networks:['home']}});
+  await p.forget();
+  p.snapshot.history_operation = 7; p.snapshot.history_ok = false;
+  await p.poll();
+  assert.equal(p.networkRows('saved').length, 1);
+  assert.equal(p.networkRows('saved')[0].children[1].disabled, false);
+  assert.match(p.get('status').textContent, /删除未能完成/);
+  assert.match(p.get('status').className, /error/);
+  assert.equal(p.get('progress').hidden, true);
+});
+
+test('HTTP delete rejection and an inconsistent success receipt never hide a saved network', async () => {
+  const rejected = await page({reject:'页面已失效，请刷新后重试', snapshot:{saved_networks:['home']}});
+  await rejected.forget();
+  assert.equal(rejected.networkRows('saved').length, 1);
+  assert.match(rejected.get('status').textContent, /页面已失效/);
+  const p = await page({snapshot:{saved_networks:['home']}});
+  await p.forget(); p.snapshot.history_operation = 7; p.snapshot.history_ok = true;
+  await p.poll();
+  assert.equal(p.networkRows('saved').length, 1);
+  assert.match(p.get('status').textContent, /删除未能完成/);
+});
+
+test('a synthetic delete and clicks while connecting never submit a deletion', async () => {
+  const p = await page({snapshot:{saved_networks:['home']}});
+  await p.networkRows('saved')[0].children[1].listeners.click({isTrusted:false});
+  p.snapshot.phase = 'connecting'; p.snapshot.busy = true; await p.poll();
+  assert.equal(p.networkRows('saved')[0].children[1].disabled, true);
+  await p.forget();
+  assert.equal(p.calls.filter(x => x.method === 'POST').length, 0);
 });
 
 test('scan progress is visible without stealing focus and stops when scanning completes', async () => {

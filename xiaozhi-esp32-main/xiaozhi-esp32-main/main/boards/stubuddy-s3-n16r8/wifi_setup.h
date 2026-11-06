@@ -49,6 +49,8 @@ private:
         bool manual_setup = true;
         unsigned count = 0;
         unsigned attempt = 0;
+        unsigned history_operation = 0;
+        bool history_ok = false;
         char ap_ssid[33] = {};
         char target[33] = {};
         char ip[16] = {};
@@ -57,10 +59,11 @@ private:
         unsigned saved_count = 0;
         char saved_networks[WifiHistory::kCapacity][33] = {};
     };
-    enum class CommandType { Connect, ConnectSaved, Scan };
+    enum class CommandType { Connect, ConnectSaved, ForgetSaved, Scan };
     struct Command {
         CommandType type;
         Credentials credentials;
+        unsigned operation = 0;
     };
 
     static void TaskEntry(void* context);
@@ -70,7 +73,8 @@ private:
     static esp_err_t Scan(httpd_req_t* request);
     static esp_err_t Connect(httpd_req_t* request);
     static esp_err_t Reconnect(httpd_req_t* request);
-    static esp_err_t Submit(httpd_req_t* request, bool saved);
+    static esp_err_t Forget(httpd_req_t* request);
+    static esp_err_t Submit(httpd_req_t* request, CommandType type);
     static esp_err_t PortalProbe(httpd_req_t* request);
     static esp_err_t Redirect(httpd_req_t* request, httpd_err_code_t error);
 
@@ -79,6 +83,8 @@ private:
     esp_err_t StartPortalHttp();
     esp_err_t ClosePortal();
     void BeginAttempt(const Credentials& credentials, bool user_supplied);
+    void StartSavedAttempts();
+    void TryNextSavedNetwork();
     void FailAttempt(const char* message, bool cancel_driver);
     void GotAddress();
     void FinishScan();
@@ -89,6 +95,8 @@ private:
     bool CheckToken(httpd_req_t* request);
     esp_err_t LoadStorage();
     esp_err_t SaveCredentials();
+    esp_err_t SaveHistory(const WifiHistory& updated, bool confirm_setup);
+    esp_err_t ForgetNetwork(const char* ssid);
 
     StatusLed* led_ = nullptr;
     esp_netif_t* station_ = nullptr;
@@ -107,10 +115,12 @@ private:
     std::atomic<bool> submit_pending_{false};
     std::atomic<bool> scan_pending_{false};
     std::atomic<unsigned> disconnect_reason_{0};
+    std::atomic<unsigned> next_history_operation_{0};
     WifiCueMailbox cues_;
     Snapshot status_;
     Snapshot published_;
     WifiHistory history_;
+    WifiSavedAttempts saved_attempts_;
     WifiConnectionPolicy connection_policy_;
     CaptiveDns dns_;
     Credentials pending_;

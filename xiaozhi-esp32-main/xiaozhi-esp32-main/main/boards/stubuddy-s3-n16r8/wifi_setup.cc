@@ -121,13 +121,17 @@ esp_err_t WifiSetup::SaveCredentials() {
     const bool changed = updated.Remember(pending_);
     if (!changed && history_persisted_ && setup_confirmed_)
         return ESP_OK;
+    if (!setup_confirmed_ && !user_attempt_)
+        return ESP_ERR_INVALID_STATE;
+    return SaveHistory(updated, !setup_confirmed_);
+}
+
+esp_err_t WifiSetup::SaveHistory(const WifiHistory& updated, bool confirm_setup) {
     nvs_handle_t storage;
     ESP_RETURN_ON_ERROR(nvs_open("stubuddy_wifi", NVS_READWRITE, &storage), kTag,
                         "NVS open failed");
-    esp_err_t result = ESP_OK;
-    if (changed || !history_persisted_)
-        result = nvs_set_blob(storage, "history", &updated, sizeof(updated));
-    if (result == ESP_OK && (changed || !history_persisted_)) {
+    esp_err_t result = nvs_set_blob(storage, "history", &updated, sizeof(updated));
+    if (result == ESP_OK) {
         // Remove obsolete single-network and AP-password keys only after the
         // replacement record has been written. Other NVS namespaces are untouched.
         const esp_err_t legacy = nvs_erase_key(storage, "station");
@@ -137,10 +141,10 @@ esp_err_t WifiSetup::SaveCredentials() {
         if (password != ESP_OK && password != ESP_ERR_NVS_NOT_FOUND)
             result = password;
     }
-    if (result == ESP_OK && !setup_confirmed_) {
+    if (result == ESP_OK && confirm_setup) {
         // A legacy history alone is not completed onboarding. Mark completion
         // only after an explicit setup request actually acquired an IP.
-        result = user_attempt_ ? nvs_set_u8(storage, "setup_done", 1) : ESP_ERR_INVALID_STATE;
+        result = nvs_set_u8(storage, "setup_done", 1);
     }
     if (result == ESP_OK)
         result = nvs_commit(storage);
@@ -148,14 +152,39 @@ esp_err_t WifiSetup::SaveCredentials() {
     if (result == ESP_OK) {
         history_ = updated;
         history_persisted_ = true;
-        setup_confirmed_ = true;
+        if (confirm_setup)
+            setup_confirmed_ = true;
     }
     return result;
 }
 
+esp_err_t WifiSetup::ForgetNetwork(const char* ssid) {
+    if (!connection_policy_.manual_setup() || connecting_ || disconnecting_ || online_.load()) {
+        RetryError("设备正在连接或已连接，请稍候再删除");
+        return ESP_ERR_INVALID_STATE;
+    }
+    WifiHistory updated = history_;
+    if (!updated.Forget(ssid)) {
+        RetryError("已保存的网络不存在，请刷新列表");
+        return ESP_ERR_NOT_FOUND;
+    }
+    const esp_err_t result = SaveHistory(updated, false);
+    if (result != ESP_OK) {
+        RetryError("删除保存失败，请重试");
+        return result;
+    }
+    if (!strcmp(pending_.ssid, ssid))
+        pending_ = {};
+    if (!strcmp(status_.target, ssid))
+        status_.target[0] = 0;
+    status_.failed = false;
+    Publish("已删除该网络，重新连接时需要输入密码");
+    ESP_LOGI(kTag, "HISTORY FORGOTTEN: remaining=%u; credentials not logged", history_.count);
+    return ESP_OK;
+}
+
 esp_err_t WifiSetup::Start(StatusLed& led, bool force_setup) {
-    ESP_LOGI(kTag,
-             "SETUP REVISION: 3.4.2; portal close=3 seconds; PTT interrupt; confirmed LED OFF");
+    ESP_LOGI(kTag, "SETUP REVISION: saved-network fallback + forget; portal close=3 seconds");
     led_ = &led;
     force_setup_ = force_setup;
     ESP_RETURN_ON_ERROR(LoadStorage(), kTag, "Cannot load WiFi settings");
@@ -268,7 +297,8 @@ void WifiSetup::OnEvent(void* context, esp_event_base_t base, int32_t id, void* 
 void WifiSetup::Publish(const char* message) {
     if (message)
         snprintf(status_.message, sizeof(status_.message), "%s", message);
-    status_.busy = connecting_ || disconnecting_;
+    status_.busy = connecting_ || disconnecting_ ||
+                   (connection_policy_.AutomaticReconnectAllowed() && saved_attempts_.pending());
     status_.scanning = scanning_;
     status_.manual_setup = connection_policy_.manual_setup();
     status_.saved_count = history_.count;
@@ -322,7 +352,7 @@ esp_err_t WifiSetup::StartPortalHttp() {
         httpd_config_t config = HTTPD_DEFAULT_CONFIG();
         config.stack_size = 8192;
         config.max_open_sockets = 4;
-        config.max_uri_handlers = 7;
+        config.max_uri_handlers = 8;
         config.uri_match_fn = httpd_uri_match_wildcard;
         config.max_resp_headers = 8;
         config.max_req_hdr_len = 2048;
@@ -338,6 +368,7 @@ esp_err_t WifiSetup::StartPortalHttp() {
             {.uri = "/api/scan", .method = HTTP_GET, .handler = Scan, .user_ctx = this},
             {.uri = "/api/connect", .method = HTTP_POST, .handler = Connect, .user_ctx = this},
             {.uri = "/api/reconnect", .method = HTTP_POST, .handler = Reconnect, .user_ctx = this},
+            {.uri = "/api/forget", .method = HTTP_POST, .handler = Forget, .user_ctx = this},
             // Keep these last: exact application routes take priority. Normal
             // OS connectivity probes must not take the warning-producing 404 path.
             {.uri = "/*", .method = HTTP_GET, .handler = PortalProbe, .user_ctx = this},
@@ -376,6 +407,22 @@ esp_err_t WifiSetup::ClosePortal() {
     return ESP_OK;
 }
 
+void WifiSetup::StartSavedAttempts() {
+    saved_attempts_.Start(history_.count);
+    TryNextSavedNetwork();
+}
+
+void WifiSetup::TryNextSavedNetwork() {
+    if (connecting_ || disconnecting_ || online_.load() ||
+        !connection_policy_.AutomaticReconnectAllowed())
+        return;
+    unsigned index = 0;
+    if (saved_attempts_.Take(index)) {
+        ESP_LOGI(kTag, "SAVED TRY: index=%u total=%u", index + 1, saved_attempts_.count());
+        BeginAttempt(history_.items[index], false);
+    }
+}
+
 void WifiSetup::BeginAttempt(const Credentials& credentials, bool user_supplied) {
     if (connecting_ || disconnecting_ || online_.load())
         return;
@@ -391,6 +438,8 @@ void WifiSetup::BeginAttempt(const Credentials& credentials, bool user_supplied)
     pending_ = credentials;
     error_led_until_ = 0;
     user_attempt_ = user_supplied;
+    if (user_supplied)
+        saved_attempts_.Start(0);
     wifi_config_t station = {};
     memcpy(station.sta.ssid, credentials.ssid, strlen(credentials.ssid));
     memcpy(station.sta.password, credentials.password, strlen(credentials.password));
@@ -428,6 +477,18 @@ void WifiSetup::FailAttempt(const char* message, bool cancel_driver) {
         disconnecting_ = esp_wifi_disconnect() == ESP_OK;
         disconnect_deadline_ = Now() + 1000;
     }
+    if (!user_attempt_ && connection_policy_.AutomaticReconnectAllowed() &&
+        saved_attempts_.pending()) {
+        // The task drains the old disconnect/IP events before starting the next
+        // candidate. Intermediate failures never open the AP or emit an error cue.
+        status_.phase = Phase::Connecting;
+        status_.failed = false;
+        status_.ip[0] = 0;
+        Publish("当前网络不可用，正在尝试下一个已保存网络");
+        ESP_LOGW(kTag, "SAVED ATTEMPT FAILED: %s; trying next saved entry", message);
+        return;
+    }
+    saved_attempts_.Start(0);
     const esp_err_t result = OpenPortal();
     if (result != ESP_OK) {
         Fault(result, "open portal after failure");
@@ -462,6 +523,7 @@ void WifiSetup::GotAddress() {
     // The AP's three-second grace period is only for the phone's success page;
     // a drop during that period must use the normal bounded reconnect path.
     connection_policy_.SetupCompleted();
+    saved_attempts_.Start(0);
     connecting_ = false;
     status_.phase = Phase::Connected;
     status_.failed = false;
@@ -547,7 +609,7 @@ void WifiSetup::TaskMain() {
     // The radio is now running, providing entropy before any page exposes this token.
     RandomHex(csrf_, 16);
     if (connection_policy_.AutomaticReconnectAllowed())
-        BeginAttempt(history_.items[0], false);
+        StartSavedAttempts();
     else {
         const esp_err_t opened = OpenPortal();
         if (opened != ESP_OK) {
@@ -571,13 +633,14 @@ void WifiSetup::TaskMain() {
                 if (connection_policy_.manual_setup())
                     FailAttempt("连接已断开，请选择网络重新连接", false);
                 else {
-                    ESP_LOGW(kTag, "WiFi lost; reconnecting for up to 20 seconds");
-                    BeginAttempt(history_.items[0], false);
+                    ESP_LOGW(kTag, "WiFi lost; trying saved networks in order (20s per entry)");
+                    StartSavedAttempts();
                 }
             } else if (connecting_) {
                 const unsigned reason = disconnect_reason_.load();
                 if (user_attempt_ || reason == WIFI_REASON_AUTH_FAIL ||
-                    reason == WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT) {
+                    reason == WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT ||
+                    reason == WIFI_REASON_NO_AP_FOUND) {
                     FailAttempt(reason == WIFI_REASON_AUTH_FAIL ||
                                         reason == WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT
                                     ? "认证失败，请检查 Wi-Fi 密码与路由器设置"
@@ -608,6 +671,7 @@ void WifiSetup::TaskMain() {
             if (esp_wifi_connect() != ESP_OK)
                 FailAttempt("重连失败，请重新配网", true);
         }
+        TryNextSavedNetwork();
         if (scanning_ && now >= scan_deadline_) {
             esp_wifi_scan_stop();
             esp_wifi_clear_ap_list();
@@ -624,7 +688,11 @@ void WifiSetup::TaskMain() {
         if (xQueueReceive(commands_, &command, pdMS_TO_TICKS(100)) != pdTRUE)
             continue;
         if (command.type != CommandType::Scan) {
-            if (command.type == CommandType::Connect)
+            if (command.type == CommandType::ForgetSaved) {
+                status_.history_ok = ForgetNetwork(command.credentials.ssid) == ESP_OK;
+                status_.history_operation = command.operation;
+                Publish(nullptr);
+            } else if (command.type == CommandType::Connect)
                 BeginAttempt(command.credentials, true);
             else {
                 const int found = history_.Find(command.credentials.ssid);
@@ -731,6 +799,8 @@ esp_err_t WifiSetup::Status(httpd_req_t* request) {
         cJSON_AddStringToObject(root, "ssid", snapshot.target);
         cJSON_AddStringToObject(root, "ip", snapshot.ip);
         cJSON_AddNumberToObject(root, "attempt", snapshot.attempt);
+        cJSON_AddNumberToObject(root, "history_operation", snapshot.history_operation);
+        cJSON_AddBoolToObject(root, "history_ok", snapshot.history_ok);
         cJSON_AddBoolToObject(root, "busy", snapshot.busy || self.submit_pending_.load());
         cJSON_AddBoolToObject(root, "scanning", snapshot.scanning || self.scan_pending_.load());
         cJSON* saved = cJSON_AddArrayToObject(root, "saved_networks");
@@ -768,21 +838,30 @@ esp_err_t WifiSetup::Scan(httpd_req_t* request) {
     return Status(request);
 }
 
-esp_err_t WifiSetup::Connect(httpd_req_t* request) { return Submit(request, false); }
+esp_err_t WifiSetup::Connect(httpd_req_t* request) { return Submit(request, CommandType::Connect); }
 
-esp_err_t WifiSetup::Reconnect(httpd_req_t* request) { return Submit(request, true); }
+esp_err_t WifiSetup::Reconnect(httpd_req_t* request) {
+    return Submit(request, CommandType::ConnectSaved);
+}
 
-esp_err_t WifiSetup::Submit(httpd_req_t* request, bool saved) {
+esp_err_t WifiSetup::Forget(httpd_req_t* request) {
+    return Submit(request, CommandType::ForgetSaved);
+}
+
+esp_err_t WifiSetup::Submit(httpd_req_t* request, CommandType type) {
     auto& self = *static_cast<WifiSetup*>(request->user_ctx);
+    const bool saved = type != CommandType::Connect;
     if (self.failed())
         return ApiError(request, "503 Service Unavailable", "网络模块异常，请重新上电");
     if (!self.CheckToken(request))
         return ApiError(request, "403 Forbidden", "页面已失效，请刷新后重试");
     char action[24] = {};
-    const char* expected_action = saved ? "history-reconnect" : "manual-connect";
+    const char* expected_action = type == CommandType::ForgetSaved ? "history-forget"
+                                  : saved                          ? "history-reconnect"
+                                                                   : "manual-connect";
     if (httpd_req_get_hdr_value_str(request, "X-Setup-Action", action, sizeof(action)) != ESP_OK ||
         strcmp(action, expected_action) != 0)
-        return ApiError(request, "400 Bad Request", "配网页已更新，请刷新后点击连接");
+        return ApiError(request, "400 Bad Request", "配网页已更新，请刷新后重试");
     if (request->content_len <= 0 || request->content_len > 512)
         return ApiError(request, "400 Bad Request", "输入内容过长或为空");
     char content_type[48] = {};
@@ -838,10 +917,13 @@ esp_err_t WifiSetup::Submit(httpd_req_t* request, bool saved) {
     if (!self.submit_pending_.compare_exchange_strong(expected, true)) {
         cJSON_Delete(root);
         memset(body, 0, sizeof(body));
-        return ApiError(request, "409 Conflict", "已有连接请求，请稍候");
+        return ApiError(request, "409 Conflict", "已有操作请求，请稍候");
     }
     Command command = {};
-    command.type = saved ? CommandType::ConnectSaved : CommandType::Connect;
+    command.type = type;
+    if (type == CommandType::ForgetSaved)
+        command.operation = self.next_history_operation_.fetch_add(1) + 1;
+    const unsigned operation = command.operation;
     memcpy(command.credentials.ssid, ssid->valuestring, ssid_bytes);
     memcpy(command.credentials.password, secret, password_bytes);
     cJSON_Delete(root);
@@ -852,12 +934,15 @@ esp_err_t WifiSetup::Submit(httpd_req_t* request, bool saved) {
         self.submit_pending_.store(false);
         return ApiError(request, "503 Service Unavailable", "设备繁忙，请重试");
     }
-    ESP_LOGI(kTag, "CONNECT REQUEST: action=%s; accepted from setup page; credentials not logged",
+    ESP_LOGI(kTag, "SETUP REQUEST: action=%s; accepted from setup page; credentials not logged",
              expected_action);
     httpd_resp_set_status(request, "202 Accepted");
     cJSON* response = cJSON_CreateObject();
-    if (response)
+    if (response) {
         cJSON_AddBoolToObject(response, "accepted", true);
+        if (operation)
+            cJSON_AddNumberToObject(response, "operation", operation);
+    }
     return JsonResponse(request, response);
 }
 
